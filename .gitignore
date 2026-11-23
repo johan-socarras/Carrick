@@ -1,0 +1,4 @@
+/target
+*.log
+# Per-machine build settings (job limits and the like).
+/.cargo/

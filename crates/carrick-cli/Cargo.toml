@@ -1,0 +1,43 @@
+[package]
+name = "carrick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Send files and folders from one computer to another, directly and encrypted, and carry on after a dropped connection."
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.9", features = ["derive", "env"] }
+console = "0.16.6"
+indicatif = "0.18.6"
+carrick-core = { version = "0.1.5", path = "../carrick-core" }
+tokio = { version = "1.54.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# The Linux package, built by packaging/build-deb.sh with cargo-deb. It holds
+# the terminal program and the window; build both in release first.
+[package.metadata.deb]
+name = "carrick"
+maintainer = "Johan Socarras <johan-socarras@users.noreply.github.com>"
+copyright = "2026, Johan Socarras"
+license-file = ["../../LICENSE-MIT", "0"]
+extended-description = """\
+Carrick sends files and folders from one computer to another, directly when \
+the networks allow it, encrypted end to end, verified piece by piece, and it \
+carries on by itself after a dropped connection. It comes as a terminal \
+command, carrick, and a window, carrick-gui."""
+section = "net"
+priority = "optional"
+depends = "$auto"
+# The window loads these when it opens; the terminal command needs none of them.
+recommends = "libxkbcommon-x11-0, libvulkan1, mesa-vulkan-drivers, xdg-desktop-portal"
+assets = [
+    ["target/release/carrick", "usr/bin/", "755"],
+    ["target/release/carrick-gui", "usr/bin/", "755"],
+    ["../../packaging/linux/carrick.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/carrick.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["../../README.md", "usr/share/doc/carrick/", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/carrick/", "644"],
+    ["target/release/THIRD-PARTY-LICENSES.txt", "usr/share/doc/carrick/", "644"],
+]

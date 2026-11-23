@@ -1,0 +1,33 @@
+[package]
+name = "carrick-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Carrick window: send and receive with a few clicks."
+
+[lib]
+name = "carrick_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "carrick-gui"
+path = "src/main.rs"
+
+[dependencies]
+# Only for its monochrome emoji font, which draws the light and dark icons
+# (eframe does not pass that feature on).
+egui = { version = "0.37.0", default-features = false, features = ["monochrome_emoji_fonts"] }
+anyhow = "1.0.104"
+directories = "6.0.0"
+# wgpu draws the window (egui's default since 0.37), and glow (OpenGL) is the
+# fallback when wgpu finds no way to; no web view, nothing to install.
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wgpu", "x11", "wayland"] }
+carrick-core = { version = "0.1.5", path = "../carrick-core" }
+# Native file dialogs: the system dialog on Windows, the XDG portal on Linux (no GTK).
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+tokio = { version = "1.54.1", features = ["full"] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["wgpu"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+tempfile = "3"

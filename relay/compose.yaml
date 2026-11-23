@@ -1,0 +1,19 @@
+# A relay of your own for Carrick. Put RELAY_HOSTNAME=<the name or IP this
+# machine is reached at> in a .env file next to this one, then:
+#   docker compose up -d --build        (see README.md here)
+services:
+  relay:
+    build: .
+    image: carrick-relay
+    restart: unless-stopped
+    environment:
+      # Left empty, the relay stops and says what is missing.
+      RELAY_HOSTNAME: ${RELAY_HOSTNAME:-}
+      RELAY_CERT: ${RELAY_CERT:-own}
+      RELAY_EMAIL: ${RELAY_EMAIL:-}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "7842:7842/udp"
+    volumes:
+      - ./data:/data

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Carrick
+GenericName=File transfer
+Comment=Send files and folders to another computer, directly and encrypted
+Exec=carrick-gui
+Icon=carrick
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=send;receive;transfer;files;share;
+StartupWMClass=carrick

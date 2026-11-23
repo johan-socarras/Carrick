@@ -1,0 +1,4 @@
+# Made by the relay when it runs: the private key of its authority, and the
+# name of the machine. Neither belongs in the repository.
+data/
+.env
