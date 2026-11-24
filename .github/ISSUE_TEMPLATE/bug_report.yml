@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in Carrick does not work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting it. Before you paste anything, remove transfer codes, tickets, file names you would rather keep private and public IP addresses.
+
+  - type: input
+    id: version
+    attributes:
+      label: Carrick version
+      description: The window's About screen, or `carrick --version`.
+      placeholder: 0.1.7
+    validations:
+      required: true
+
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options:
+        - Windows 11 (installer)
+        - Ubuntu (.deb)
+        - Built from source (say which system below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happens
+      options:
+        - The window does not open, or draws wrongly
+        - Sending
+        - Receiving
+        - Continuing an unfinished transfer
+        - Connecting (direct, relay, fixed port)
+        - The relay container
+        - Installing or uninstalling
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: networks
+    attributes:
+      label: The two ends
+      description: Where the sender and the receiver were, if it matters, and whether Carrick said "direct" or "relay".
+      placeholder: Both on the same office network, direct; or a home network and a phone hotspot, through the relay.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+      description: The steps that lead to it, if you know them, and roughly how many files and how much data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Message or log
+      description: What Carrick showed or printed. If the window did not open, the end of carrick-gui.log in %LOCALAPPDATA%\Carrick\data (Windows) or ~/.local/share/carrick (Linux).
+      render: text

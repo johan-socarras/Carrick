@@ -1,0 +1,54 @@
+# Builds Carrick and runs its tests (cargo test) on every push to main and
+# every pull request, on Ubuntu. Windows runs the same by hand
+# (Actions > CI > Run workflow), to keep the minutes of a private repository.
+# The tests that need the Internet or a graphics adapter are ignored by
+# default and stay manual steps (see docs/testing.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE-*', 'relay/README.md']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE-*', 'relay/README.md']
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: Run on Windows too
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Transfers in the tests are between processes on one machine: no relay,
+  # no lookup service, no Internet.
+  CARRICK_NO_NOTIFY: '1'
+
+jobs:
+  ubuntu:
+    name: Ubuntu
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --all-targets
+      - run: cargo test --locked
+
+  windows:
+    name: Windows
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --all-targets
+      - run: cargo test --locked
