@@ -20,8 +20,9 @@ egui = { version = "0.37.0", default-features = false, features = ["monochrome_e
 anyhow = "1.0.104"
 directories = "6.0.0"
 # wgpu draws the window (egui's default since 0.37), and glow (OpenGL) is the
-# fallback when wgpu finds no way to; no web view, nothing to install.
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wgpu", "x11", "wayland"] }
+# fallback when wgpu finds no way to; no web view, nothing to install. "links"
+# opens hyperlinks in the system's browser.
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wgpu", "x11", "wayland"] }
 carrick-core = { version = "0.1.5", path = "../carrick-core" }
 # Native file dialogs: the system dialog on Windows, the XDG portal on Linux (no GTK).
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }

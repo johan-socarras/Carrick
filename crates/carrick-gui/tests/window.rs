@@ -278,4 +278,26 @@ fn light_or_dark_is_remembered_and_about_shows_the_licence() {
     assert!(shows(&again, "THIRD-PARTY-LICENSES.txt"));
     assert!(shows(&again, "EFF Large Wordlist for Passphrases"));
     assert!(shows(&again, "CC BY 3.0 US"));
+
+    // The links ask the system to open them (eframe's "links" feature then
+    // hands the address to the browser; without it a click did nothing).
+    for (label, url) in [
+        ("eff.org/dice", "https://www.eff.org/dice"),
+        ("CC BY 3.0 US", "https://creativecommons.org/licenses/by/3.0/us/"),
+        ("github.com/johan-socarras/Carrick", "https://github.com/johan-socarras/Carrick"),
+    ] {
+        again.get_by_label(label).click();
+        again.step();
+        let opened: Vec<String> = again
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [url], "clicking {label}");
+    }
 }
