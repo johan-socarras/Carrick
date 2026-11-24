@@ -42,11 +42,20 @@ other computer you only type four words.
 
 The builds are in [Releases](https://github.com/johan-socarras/Carrick/releases).
 
-- **Windows 11**: `carrick-<version>-setup.exe` installs for the
-  current user, without administrator rights. It adds Carrick to the Start
-  menu and `carrick` to the PATH, updates an older version in place, and
-  uninstalls cleanly. It is not code-signed, so Windows SmartScreen warns the
-  first time.
+- **Windows 11**: in PowerShell,
+
+  ```powershell
+  irm https://raw.githubusercontent.com/johan-socarras/Carrick/main/install.ps1 | iex
+  ```
+
+  downloads the installer of the latest release, checks it against the
+  SHA-256 GitHub publishes for it, and runs it. Run it again to update.
+
+  Or download `carrick-<version>-setup.exe` from the release yourself. It
+  installs for the current user, without administrator rights, adds Carrick
+  to the Start menu and `carrick` to the PATH, updates an older version in
+  place, and uninstalls cleanly. It is not code-signed, so Windows
+  SmartScreen warns the first time.
 - **Ubuntu**: build the `.deb` from the source
   ([below](#build-from-source)). It holds `carrick`, `carrick-gui`, a menu
   entry and the icon.

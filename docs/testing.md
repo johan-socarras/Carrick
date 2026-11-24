@@ -72,7 +72,10 @@ adapter (wgpu takes a software one when there is one).
   none left it showed its message.
 - **The installers.** On Windows the setup installs, works from a new terminal
   and from the Start menu, updates an older version in place, and uninstalls
-  leaving the user's PATH as it was. On Ubuntu the `.deb` installs with apt,
+  leaving the user's PATH as it was. `install.ps1`, run as `… | iex` in
+  Windows PowerShell 5.1 and in PowerShell 7, downloads the release's
+  installer, checks its SHA-256 and installs it; without access to the
+  release it stops with a clear message and installs nothing. On Ubuntu the `.deb` installs with apt,
   its window opens, and it is removed cleanly.
 - **Real use.** 191 GB in 208 files between two office computers, directly.
 
