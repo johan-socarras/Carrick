@@ -15,6 +15,10 @@ use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
+/// The EFF Large Wordlist for Passphrases (https://www.eff.org/dice), by the
+/// Electronic Frontier Foundation, under CC BY 3.0 US, minus its four
+/// hyphenated words. Its credit goes in the window's About and in
+/// THIRD-PARTY-LICENSES.txt.
 const WORDS_RAW: &str = include_str!("words.txt");
 
 /// Number of words in a code.

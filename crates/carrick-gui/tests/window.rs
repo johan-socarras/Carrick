@@ -276,4 +276,6 @@ fn light_or_dark_is_remembered_and_about_shows_the_licence() {
     assert!(shows(&again, "licensed under the MIT licence or the Apache License 2.0"), "{:?}", painted(&again));
     assert!(shows(&again, "github.com/johan-socarras/Carrick"));
     assert!(shows(&again, "THIRD-PARTY-LICENSES.txt"));
+    assert!(shows(&again, "EFF Large Wordlist for Passphrases"));
+    assert!(shows(&again, "CC BY 3.0 US"));
 }

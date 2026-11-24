@@ -52,9 +52,18 @@ def licence_files(pkg):
 
 
 out = [
-    "Carrick includes the following third-party software.",
-    "Each entry gives the crate, its version, its licence, and the licence and",
-    "notice files it ships.",
+    "Carrick includes the following third-party software and data.",
+    "",
+    "=" * 78,
+    "EFF Large Wordlist for Passphrases",
+    "By the Electronic Frontier Foundation: https://www.eff.org/dice",
+    "Licence: Creative Commons Attribution 3.0 United States (CC BY 3.0 US),",
+    "https://creativecommons.org/licenses/by/3.0/us/",
+    "Changes: Carrick uses the list without its four hyphenated words, to make",
+    "the words of its transfer codes.",
+    "",
+    "Each entry below gives the crate, its version, its licence, and the licence",
+    "and notice files it ships.",
     "",
 ]
 shown = {}  # text -> where it was first written out, to give each text once

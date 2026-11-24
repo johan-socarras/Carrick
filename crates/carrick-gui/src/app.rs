@@ -526,6 +526,14 @@ impl App {
         ui.add_space(10.0);
         ui.label(RichText::new("Third-party software").strong());
         ui.label("Carrick is built on open-source libraries, among them iroh and iroh-blobs by n0, and egui. Their licences come with Carrick, in THIRD-PARTY-LICENSES.txt.");
+        ui.add_space(4.0);
+        ui.label(WORD_LIST_CREDIT);
+        ui.horizontal_wrapped(|ui| {
+            ui.hyperlink_to("eff.org/dice", "https://www.eff.org/dice");
+            ui.label("·");
+            ui.hyperlink_to("CC BY 3.0 US", "https://creativecommons.org/licenses/by/3.0/us/");
+        });
+        ui.add_space(4.0);
         match third_party_licences() {
             Some(path) => {
                 if ui.button("Open the third-party licences").clicked() {
@@ -777,6 +785,9 @@ const AUTHOR: &str = "Johan Socarras";
 const REPOSITORY: &str = "https://github.com/johan-socarras/Carrick";
 const LICENSE_MIT: &str = include_str!("../../../LICENSE-MIT");
 const LICENSE_APACHE: &str = include_str!("../../../LICENSE-APACHE");
+/// The words of the codes come from the EFF, under CC BY 3.0 US, which asks
+/// for this credit wherever the list goes.
+const WORD_LIST_CREDIT: &str = "The words in the codes come from the EFF Large Wordlist for Passphrases, by the Electronic Frontier Foundation, licensed under CC BY 3.0 US. Carrick uses it without its four hyphenated words.";
 
 /// The licences of the libraries in Carrick, where the installers put them:
 /// next to the program on Windows, in the package's documentation on Linux.
