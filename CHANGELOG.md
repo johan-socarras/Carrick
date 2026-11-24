@@ -12,6 +12,8 @@ follow [Semantic Versioning](https://semver.org/). This repository's history sta
 - A new icon: two arrows, blue and white, tied in one knot on their way across,
   after the carrick bend the program is named after. The window, the Start
   menu, the installer and the Linux menu all use it.
+- The `.deb` is built on Ubuntu 24.04, so it installs on 24.04 and newer,
+  and it comes with the release.
 
 ## [0.1.7] - 2026-11-23
 

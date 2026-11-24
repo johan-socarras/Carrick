@@ -56,9 +56,16 @@ The builds are in [Releases](https://github.com/johan-socarras/Carrick/releases)
   to the Start menu and `carrick` to the PATH, updates an older version in
   place, and uninstalls cleanly. It is not code-signed, so Windows
   SmartScreen warns the first time.
-- **Ubuntu**: build the `.deb` from the source
-  ([below](#build-from-source)). It holds `carrick`, `carrick-gui`, a menu
-  entry and the icon.
+- **Ubuntu 24.04 and newer**: download `carrick_<version>-1_amd64.deb` from
+  the release and install it with
+
+  ```bash
+  sudo apt install ./carrick_*_amd64.deb
+  ```
+
+  It holds `carrick`, `carrick-gui`, a menu entry and the icon, and
+  `sudo apt remove carrick` takes it away. Other distributions can build it
+  from the source ([below](#build-from-source)).
 
 ## Features
 

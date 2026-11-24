@@ -75,7 +75,7 @@ adapter (wgpu takes a software one when there is one).
   leaving the user's PATH as it was. `install.ps1`, run as `… | iex` in
   Windows PowerShell 5.1 and in PowerShell 7, downloads the release's
   installer, checks its SHA-256 and installs it; without access to the
-  release it stops with a clear message and installs nothing. On Ubuntu the `.deb` installs with apt,
+  release it stops with a clear message and installs nothing. The `.deb` is built in an Ubuntu 24.04 container; it installs, runs and is removed on a fresh Ubuntu 24.04, and on Ubuntu 26.04 it installs with apt,
   its window opens, and it is removed cleanly.
 - **Real use.** 191 GB in 208 files between two office computers, directly.
 
