@@ -1,6 +1,9 @@
-"""Draws Carrick's icon (the one the window draws in main.rs: two white dots
-joined by a line, on a blue rounded square) as carrick.png (256 px) and
-carrick.ico (16 to 256 px), for the installers. Needs Pillow.
+"""Makes Carrick's icons from packaging/icon-source.png (two arrows, blue and
+white, tied in one knot on their way across): carrick.png (256 px, for Linux
+and the README), carrick.ico (16 to 256 px, for Windows) and the window's own
+icon, crates/carrick-gui/src/icon-64.rgba (64 x 64, raw RGBA). The drawing is
+wider than it is tall, so it sits centred on a transparent square. Needs
+Pillow.
 
     python packaging/icon.py
 """
@@ -9,36 +12,34 @@ from pathlib import Path
 from PIL import Image
 
 HERE = Path(__file__).parent
-N = 64  # the design is on a 64-unit grid, like main.rs
-BLUE = (0x2B, 0x6C, 0xD6, 255)
-WHITE = (255, 255, 255, 255)
+SOURCE = HERE / "icon-source.png"
+WINDOW_ICON = HERE.parent / "crates" / "carrick-gui" / "src" / "icon-64.rgba"
 
 
-def draw(size: int) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    px = img.load()
-    s = N / size
-    for py in range(size):
-        for qx in range(size):
-            # Sample the 64-unit design at the pixel centre.
-            x, y = (qx + 0.5) * s, (py + 0.5) * s
-            r = 14.0
-            cx = min(max(x, 2.0 + r), 62.0 - r)
-            cy = min(max(y, 2.0 + r), 62.0 - r)
-            if (x - cx) ** 2 + (y - cy) ** 2 > r * r:
-                continue
+def drawing() -> Image.Image:
+    """The source, without its nearly invisible stray pixels, cut to the drawing."""
+    img = Image.open(SOURCE).convert("RGBA")
+    alpha = img.getchannel("A").point(lambda v: 0 if v <= 8 else v)
+    img.putalpha(alpha)
+    return img.crop(alpha.getbbox())
 
-            def near(ax, ay, radius):
-                return (x - ax) ** 2 + (y - ay) ** 2 <= radius * radius
 
-            line = 20.0 <= x <= 44.0 and abs(y - 32.0) <= 2.5
-            white = near(18.0, 32.0, 7.0) or near(46.0, 32.0, 7.0) or line
-            px[qx, py] = WHITE if white else BLUE
-    return img
+def square(art: Image.Image, size: int) -> Image.Image:
+    """The drawing centred on a transparent square, with a small margin (none
+    at the smallest sizes, where every pixel counts)."""
+    margin = 0 if size <= 32 else round(size * 0.04)
+    width = size - 2 * margin
+    height = max(1, round(art.height * width / art.width))
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.alpha_composite(art.resize((width, height), Image.LANCZOS), (margin, (size - height) // 2))
+    return out
 
 
 if __name__ == "__main__":
-    big = draw(1024).resize((256, 256), Image.LANCZOS)
-    big.save(HERE / "carrick.png")
-    big.save(HERE / "carrick.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
-    print("carrick.png and carrick.ico written")
+    art = drawing()
+    square(art, 256).save(HERE / "carrick.png", optimize=True)
+    sizes = [16, 24, 32, 48, 64, 128, 256]
+    frames = [square(art, s) for s in sizes]
+    frames[-1].save(HERE / "carrick.ico", sizes=[(s, s) for s in sizes], append_images=frames[:-1])
+    WINDOW_ICON.write_bytes(square(art, 64).tobytes())
+    print("carrick.png, carrick.ico and icon-64.rgba written")

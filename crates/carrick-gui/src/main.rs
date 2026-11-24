@@ -233,27 +233,11 @@ fn fail(text: &str, log: Option<&PathBuf>) -> ! {
     rfd::MessageDialog::new().set_title("Carrick").set_description(text).set_level(rfd::MessageLevel::Error).show();
     std::process::exit(1);
 }
-/// The window icon, drawn here: two dots joined by a line, on blue.
+/// The window icon: two arrows tied in one knot, 64 x 64, made from
+/// packaging/icon-source.png by packaging/icon.py.
 fn icon() -> egui::IconData {
-    const N: usize = 64;
-    let mut rgba = vec![0u8; N * N * 4];
-    for py in 0..N {
-        for px in 0..N {
-            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
-            // Rounded square.
-            let r = 14.0;
-            let cx = x.clamp(2.0 + r, 62.0 - r);
-            let cy = y.clamp(2.0 + r, 62.0 - r);
-            if (x - cx).powi(2) + (y - cy).powi(2) > r * r {
-                continue;
-            }
-            let near = |ax: f32, ay: f32, radius: f32| (x - ax).powi(2) + (y - ay).powi(2) <= radius * radius;
-            let line = (20.0..=44.0).contains(&x) && (y - 32.0).abs() <= 2.5;
-            let white = near(18.0, 32.0, 7.0) || near(46.0, 32.0, 7.0) || line;
-            let i = (py * N + px) * 4;
-            let [r, g, b] = if white { [255, 255, 255] } else { [0x2b, 0x6c, 0xd6] };
-            rgba[i..i + 4].copy_from_slice(&[r, g, b, 255]);
-        }
-    }
-    egui::IconData { rgba, width: N as u32, height: N as u32 }
+    const N: u32 = 64;
+    let rgba = include_bytes!("icon-64.rgba").to_vec();
+    debug_assert_eq!(rgba.len(), (N * N * 4) as usize);
+    egui::IconData { rgba, width: N, height: N }
 }

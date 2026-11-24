@@ -5,6 +5,14 @@ What changes in each version of Carrick. The format follows
 follow [Semantic Versioning](https://semver.org/). This repository's history starts at
 0.1.5; the versions before it are listed for what they changed.
 
+## [0.1.8] - 2026-11-24
+
+### Changed
+
+- A new icon: two arrows, blue and white, tied in one knot on their way across,
+  after the carrick bend the program is named after. The window, the Start
+  menu, the installer and the Linux menu all use it.
+
 ## [0.1.7] - 2026-11-23
 
 ### Fixed
@@ -102,4 +110,5 @@ The first version.
 - Installers for Windows (per user, without administrator rights) and a
   `.deb` for Ubuntu and Debian, with the licences of every crate inside.
 
+[0.1.8]: https://github.com/johan-socarras/Carrick/releases/tag/v0.1.8
 [0.1.7]: https://github.com/johan-socarras/Carrick/releases/tag/v0.1.7
