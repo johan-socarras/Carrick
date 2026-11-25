@@ -210,11 +210,13 @@ fn a_transfer_running_in_a_terminal_is_shown_and_not_offered_to_continue() {
     assert!(w.query_by_role_and_label(Role::Button, "Continue").is_none(), "Continue offered on a running transfer");
     assert!(w.query_by_role_and_label(Role::Button, "Forget").is_none());
 
-    // The terminal ends (closed, or cut short): now it is unfinished.
+    // The terminal ends (closed, or cut short): now it is unfinished. The
+    // window looks again every second, as it does for real. On Linux a
+    // process another test starts at that moment can keep the lock for an
+    // instant (a new process holds copies of the open files until it runs
+    // its program), so one look right away is not enough.
     drop(held);
-    w.state_mut().scan();
-    settle(&mut w);
-    assert!(w.state().elsewhere.is_empty());
+    wait(&mut w, "the window to see the terminal gone", |app| app.elsewhere.is_empty());
     assert_eq!(w.state().unfinished.len(), 1);
     assert!(shows(&w, "Unfinished"));
     assert!(w.query_by_role_and_label(Role::Button, "Continue").is_some());
