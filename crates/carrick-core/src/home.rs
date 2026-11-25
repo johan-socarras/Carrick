@@ -208,6 +208,9 @@ impl Home {
     /// their place in the destination stay. False if there is no such one.
     pub fn forget(&self, id: &str) -> Result<bool> {
         let Some(record) = self.load(id)? else { return Ok(false) };
+        if self.is_running(id) {
+            anyhow::bail!("transfer {id} is running in another Carrick on this computer; stop it there first");
+        }
         if record.role == Role::Receive && record.state == State::Active {
             // The partial pieces live next to the destination.
             let _ = std::fs::remove_dir_all(&record.store);

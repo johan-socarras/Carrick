@@ -14,9 +14,10 @@ use std::{
 use eframe::egui::{self, Align, Layout, RichText, ScrollArea, TextEdit, Ui, ViewportCommand};
 use carrick_core::{
     events::Route,
-    home::{Existing, Home, Record, Role, State},
+    home::{now_secs, Existing, Home, Record, Role, State},
     net::NetOptions,
     recv::{self, ReceiveOptions},
+    running::{Finished, Progress, Stage},
     send::{self, SendOptions},
 };
 
@@ -78,6 +79,8 @@ pub struct SendForm {
     pub ticket: bool,
     pub current: Option<Arc<Mutex<JobView>>>,
     copied: Option<Instant>,
+    /// When the command for a terminal was copied.
+    copied_command: Option<Instant>,
 }
 
 /// The receive screen: what was entered, and the receive it started.
@@ -87,7 +90,12 @@ pub struct ReceiveForm {
     /// What to do with files that already exist; asking by default.
     pub existing: Existing,
     pub current: Option<Arc<Mutex<JobView>>>,
+    /// Folders received into lately, newest first, kept between runs.
+    pub recent: Vec<PathBuf>,
 }
+
+/// How many folders "Save to" remembers.
+pub const RECENT_FOLDERS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Picking {
@@ -110,8 +118,15 @@ pub struct App {
     pub receive: ReceiveForm,
     /// Transfers started in this window, newest first.
     pub jobs: Vec<Job>,
-    /// Unfinished transfers on this computer that this window is not running.
+    /// Unfinished transfers on this computer that nothing is running.
     pub unfinished: Vec<Record>,
+    /// Transfers another Carrick on this computer is running (a terminal,
+    /// another window), with where they stand when they have said.
+    pub elsewhere: Vec<(Record, Option<Progress>)>,
+    /// The last transfers that ended well, newest first, and whether they
+    /// are on screen.
+    pub history: Vec<Finished>,
+    pub show_history: bool,
     scanned: Option<Instant>,
     /// Something the window itself could not do.
     pub problem: Option<String>,
@@ -134,15 +149,24 @@ impl App {
             .enable_all()
             .build()
             .expect("start the runtime");
-        let dest = settings.default_dest.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
+        // The folder used last time, or the default one the first time.
+        let recent = read_folders(&settings.home);
+        let dest = recent
+            .first()
+            .or(settings.default_dest.as_ref())
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
         Self {
             settings,
             runtime: Some(runtime),
             screen: Screen::Send,
-            send: SendForm { paths: Vec::new(), ticket: false, current: None, copied: None },
-            receive: ReceiveForm { code: String::new(), dest, existing: Existing::Ask, current: None },
+            send: SendForm { paths: Vec::new(), ticket: false, current: None, copied: None, copied_command: None },
+            receive: ReceiveForm { code: String::new(), dest, existing: Existing::Ask, current: None, recent },
             jobs: Vec::new(),
             unfinished: Vec::new(),
+            elsewhere: Vec::new(),
+            history: Vec::new(),
+            show_history: false,
             scanned: None,
             problem: None,
             dialog: None,
@@ -175,6 +199,7 @@ impl App {
             self.theme = Some(now);
         }
         self.handle_close(&ctx);
+        self.line_up();
         self.poll_dialog();
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
@@ -182,8 +207,15 @@ impl App {
             self.choose(dropped);
             self.screen = Screen::Send;
         }
-        if self.screen == Screen::Transfers && self.scanned.is_none_or(|at| at.elapsed() > Duration::from_secs(2)) {
-            self.scan();
+        if self.screen == Screen::Transfers {
+            // What runs elsewhere moves on its own; look again more often.
+            let every = if self.elsewhere.is_empty() { Duration::from_secs(2) } else { Duration::from_secs(1) };
+            if self.scanned.is_none_or(|at| at.elapsed() > every) {
+                self.scan();
+            }
+            if !self.elsewhere.is_empty() {
+                ctx.request_repaint_after(every);
+            }
         }
 
         egui::Panel::top("tabs")
@@ -227,8 +259,10 @@ impl App {
 
     fn tabs(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Carrick").strong().size(18.0));
-            ui.add_space(14.0);
+            // No name here: the title bar of the window already says it. The
+            // knot of the icon instead.
+            look::knot(ui);
+            ui.add_space(6.0);
             let running = self.running();
             for (screen, label) in [(Screen::Send, "Send"), (Screen::Receive, "Receive"), (Screen::Transfers, "Transfers")] {
                 let text = if screen == Screen::Transfers && running > 0 { format!("{label} ({running})") } else { label.to_string() };
@@ -339,7 +373,12 @@ impl App {
         }
 
         ui.add_space(8.0);
-        ui.checkbox(&mut self.send.ticket, "Use a ticket instead of a code (works without Internet)");
+        ui.checkbox(&mut self.send.ticket, "No Internet? Use a long code instead of four words");
+        ui.label(
+            RichText::new("Works when both computers are on the same network. The long code has to be copied and pasted; it cannot be read out.")
+                .small()
+                .color(look::weak(ui)),
+        );
         ui.add_space(8.0);
         if look::primary(ui, !self.send.paths.is_empty(), "Start sending").clicked() {
             self.start_send(ui.ctx());
@@ -350,43 +389,65 @@ impl App {
     fn code_box(&mut self, ui: &mut Ui, view: &JobView) {
         let key = view.code.clone().map(|c| (c, true)).or_else(|| view.ticket.clone().map(|t| (t, false)));
         let Some((key, is_code)) = key else {
-            if !view.phase.is_over() {
+            if view.phase == Phase::Queued {
+                ui.heading(format!("{} is in line", view.name));
+                ui.label("It goes on offer when the send before it is done. The long code appears then: it carries addresses only known at that moment.");
+            } else if !view.phase.is_over() {
                 ui.heading("Preparing the files");
                 ui.label("The code appears when they are ready.");
             }
             return;
         };
-        ui.heading(format!("Ready to send {}", view.name));
+        if view.phase == Phase::Queued {
+            ui.heading(format!("{} is in line", view.name));
+            ui.label(RichText::new("It goes on offer when the send before it is done. The code already works: the other computer waits until then and starts by itself.").color(look::weak(ui)));
+        } else {
+            ui.heading(format!("Ready to send {}", view.name));
+        }
         ui.add_space(4.0);
         look::card(ui, |ui| {
             ui.label(if is_code {
                 "On the other computer, open Carrick, choose Receive and enter this code:"
             } else {
-                "On the other computer, open Carrick, choose Receive and paste this ticket:"
+                "On the other computer, open Carrick, choose Receive and paste this long code:"
             });
             ui.add_space(6.0);
-            if is_code {
-                // As large as fits on one line: the longest codes have 39 letters.
-                let size = (ui.available_width() / (key.chars().count() as f32 * 0.61)).clamp(14.0, 28.0);
-                ui.add(egui::Label::new(RichText::new(&key).monospace().size(size).strong()).wrap());
-            } else {
-                ui.add(egui::Label::new(RichText::new(&key).monospace().size(12.0)).wrap());
-            }
+            let color = look::code_color(ui);
+            look::code_frame(ui, |ui| {
+                if is_code {
+                    // As large as fits on one line: the longest codes have 39 letters.
+                    let size = (ui.available_width() / (key.chars().count() as f32 * 0.61)).clamp(14.0, 28.0);
+                    ui.add(egui::Label::new(RichText::new(&key).monospace().size(size).strong().color(color)).wrap());
+                } else {
+                    ui.add(egui::Label::new(RichText::new(&key).monospace().size(12.0).color(color)).wrap());
+                }
+            });
             ui.add_space(6.0);
+            // The code, or the whole command for a terminal (PowerShell or any other).
+            let command = format!("carrick receive {key}");
             ui.horizontal(|ui| {
-                if ui.button("Copy").clicked() {
+                if look::brand(ui, "Copy").clicked() {
                     ui.ctx().copy_text(key.clone());
                     self.send.copied = Some(Instant::now());
+                    self.send.copied_command = None;
                 }
-                if self.send.copied.is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+                if ui.button("Copy command").on_hover_text("Copies the command to receive this in a terminal").clicked() {
+                    ui.ctx().copy_text(command.clone());
+                    self.send.copied_command = Some(Instant::now());
+                    self.send.copied = None;
+                }
+                let recent = |at: Option<Instant>| at.is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+                if recent(self.send.copied) {
                     ui.label(RichText::new("Copied").color(look::good(ui)));
+                    ui.ctx().request_repaint_after(Duration::from_millis(300));
+                } else if recent(self.send.copied_command) {
+                    ui.label(RichText::new("Command copied").color(look::good(ui)));
                     ui.ctx().request_repaint_after(Duration::from_millis(300));
                 }
             });
-            if is_code {
-                ui.add_space(4.0);
-                ui.label(RichText::new(format!("In a terminal: carrick receive {key}")).small().color(look::weak(ui)));
-            }
+            ui.add_space(4.0);
+            let line = if is_code { format!("In a terminal: {command}") } else { "In a terminal: carrick receive and the long code".to_string() };
+            ui.add(egui::Label::new(RichText::new(line).small().color(look::weak(ui))).truncate());
         });
     }
 
@@ -396,7 +457,8 @@ impl App {
         let home = self.settings.home.clone();
         let net = self.settings.net.clone();
         let absolute: Vec<PathBuf> = paths.iter().map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone())).collect();
-        let job = Job::start(
+        let (go, turn) = tokio::sync::watch::channel(self.line_is_free());
+        let mut job = Job::start(
             self.runtime(),
             ctx,
             JobView::new(Kind::Send),
@@ -406,13 +468,61 @@ impl App {
                     || (record.role == Role::Send && record.root.is_none() && record.sources == absolute)
             },
             move |events, stop| async move {
-                let opts = SendOptions { paths, ticket, receivers: None, net };
+                let opts = SendOptions { paths, ticket, receivers: None, net, turn: Some(turn) };
                 send::send(&home, opts, events, stop).await.map(Finish::Sent)
             },
         );
+        job.turn = Some(go);
+        job.place = self.next_place();
         self.send.current = Some(job.view.clone());
         self.send.copied = None;
+        self.send.copied_command = None;
         self.jobs.insert(0, job);
+    }
+
+    // ------------------------------------------------------- line of sends
+
+    /// The place after every send in line.
+    fn next_place(&self) -> i64 {
+        self.jobs.iter().filter(|j| j.turn.is_some()).map(|j| j.place + 1).max().unwrap_or(0)
+    }
+
+    /// Whether a send started now could go on at once: no send in line
+    /// still has someone waiting for it.
+    fn line_is_free(&self) -> bool {
+        !self.jobs.iter().any(|j| j.turn.is_some() && j.is_running() && !served(&j.view.lock().expect("view")))
+    }
+
+    /// Gives the turn to the first send in line that still has work, and
+    /// holds back the others. A send someone already has in full stays on
+    /// offer for latecomers without holding the line.
+    fn line_up(&self) {
+        let mut sends: Vec<&Job> = self.jobs.iter().filter(|j| j.turn.is_some() && j.is_running()).collect();
+        sends.sort_by_key(|j| j.place);
+        let mut taken = false;
+        for job in sends {
+            let go = if served(&job.view.lock().expect("view")) {
+                true
+            } else if !taken {
+                taken = true;
+                true
+            } else {
+                false
+            };
+            if let Some(turn) = &job.turn {
+                turn.send_if_modified(|now| std::mem::replace(now, go) != go);
+            }
+        }
+    }
+
+    /// Puts a send at the front of the line; the one it passes pauses and
+    /// carries on after it.
+    fn first(&mut self, view: &Arc<Mutex<JobView>>) {
+        let front = self.jobs.iter().filter(|j| j.turn.is_some()).map(|j| j.place).min().unwrap_or(0);
+        if let Some(job) = self.jobs.iter_mut().find(|j| Arc::ptr_eq(&j.view, view)) {
+            job.place = front - 1;
+        }
+        self.line_up();
     }
 
     // ------------------------------------------------------------- receive
@@ -436,21 +546,62 @@ impl App {
         let label = ui.label(RichText::new("Code").strong());
         ui.add(
             TextEdit::singleline(&mut self.receive.code)
-                .hint_text("the four words the sender sees, or a ticket")
+                .hint_text("the four words the sender sees, or the long code")
                 .desired_width(f32::INFINITY),
         )
         .labelled_by(label.id);
         ui.add_space(8.0);
         let label = ui.label(RichText::new("Save to").strong());
         let mut pick = false;
+        let mut chosen = None;
+        let mut drop_folder = None;
         ui.horizontal(|ui| {
             let button_width = 110.0;
-            let width = ui.available_width() - button_width - ui.spacing().item_spacing.x;
+            let menu_width = 34.0;
+            let width = ui.available_width() - button_width - menu_width - 2.0 * ui.spacing().item_spacing.x;
             ui.add(TextEdit::singleline(&mut self.receive.dest).desired_width(width)).labelled_by(label.id);
+            // The folders used lately, to pick one without looking for it.
+            let recent = &self.receive.recent;
+            let current = self.receive.dest.trim().to_string();
+            ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                ui.menu_button(RECENT_ICON, |ui| {
+                    // A fixed width, so the crosses stay inside the window.
+                    ui.set_width(400.0);
+                    ui.label(RichText::new("Recent folders").small().color(look::weak(ui)));
+                    for (i, folder) in recent.iter().enumerate() {
+                        let shown = folder.display().to_string();
+                        // The cross first, from the right, so a long path is
+                        // cut short instead of pushing it out of sight.
+                        ui.horizontal(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button(REMOVE_ICON).on_hover_text("Take it off this list").clicked() {
+                                    drop_folder = Some(i);
+                                }
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    let item = egui::Button::selectable(same_folder(&shown, &current), &shown).truncate();
+                                    if ui.add(item).clicked() {
+                                        chosen = Some(shown.clone());
+                                        ui.close();
+                                    }
+                                });
+                            });
+                        });
+                    }
+                })
+                .response
+                .on_hover_text("Folders used lately");
+            });
             pick = ui
                 .add_enabled(self.dialog.is_none(), egui::Button::new("Choose…").min_size(egui::vec2(button_width, 30.0)))
                 .clicked();
         });
+        if let Some(folder) = chosen {
+            self.receive.dest = folder;
+        }
+        if let Some(i) = drop_folder {
+            self.receive.recent.remove(i);
+            write_folders(&self.settings.home, &self.receive.recent);
+        }
         if pick {
             self.pick(ui.ctx(), Picking::Destination);
         }
@@ -480,6 +631,12 @@ impl App {
     fn start_receive(&mut self, ctx: &egui::Context) {
         let key = self.receive.code.trim().to_string();
         let dest = PathBuf::from(self.receive.dest.trim());
+        // Remembered first in the list, and offered first next time.
+        let shown = dest.display().to_string();
+        self.receive.recent.retain(|f| !same_folder(&f.display().to_string(), &shown));
+        self.receive.recent.insert(0, dest.clone());
+        self.receive.recent.truncate(RECENT_FOLDERS);
+        write_folders(&self.settings.home, &self.receive.recent);
         let existing = self.receive.existing;
         let (ask, answers) = recv::answers();
         let home = self.settings.home.clone();
@@ -557,20 +714,31 @@ impl App {
 
     // ----------------------------------------------------------- transfers
 
-    /// Reads the unfinished transfers of this computer from disk.
+    /// Reads from disk the transfers of this computer that did not finish:
+    /// those another Carrick is running, and those nothing is running.
     pub fn scan(&mut self) {
         match self.settings.home.list() {
             Ok(records) => {
-                self.unfinished = records
+                let home = &self.settings.home;
+                let (elsewhere, unfinished): (Vec<Record>, Vec<Record>) = records
                     .into_iter()
                     .filter(|r| r.state == State::Active)
                     .filter(|r| !self.jobs.iter().any(|j| j.is_running() && j.owns(r)))
                     .rev()
+                    .partition(|r| home.is_running(&r.id));
+                self.elsewhere = elsewhere
+                    .into_iter()
+                    .map(|r| {
+                        let progress = home.progress(&r.id);
+                        (r, progress)
+                    })
                     .collect();
+                self.unfinished = unfinished;
                 self.problem = None;
             }
             Err(e) => self.problem = Some(format!("Could not read the list of transfers: {e:#}")),
         }
+        self.history = self.settings.home.history();
         self.scanned = Some(Instant::now());
     }
 
@@ -578,21 +746,25 @@ impl App {
         if let Some(problem) = &self.problem {
             ui.colored_label(look::bad(ui), problem);
         }
-        if self.jobs.is_empty() && self.unfinished.is_empty() {
+        // Only what is being copied now: what ended goes to the history.
+        let running: Vec<&Job> = self.jobs.iter().filter(|j| j.is_running()).collect();
+        let mut action = None;
+        if running.is_empty() && self.elsewhere.is_empty() {
             ui.heading("Transfers");
             ui.add_space(4.0);
-            ui.label("Nothing here yet. What you send or receive shows up here, and so does anything left unfinished on this computer, to continue it.");
-            return;
-        }
-        let mut action = None;
-        if !self.jobs.is_empty() {
-            ui.heading("In this window");
+            ui.label("Nothing is being copied right now.");
+        } else {
+            ui.heading("In progress");
             ui.add_space(4.0);
-            for job in &self.jobs {
+            for job in running {
                 let view = job.view.lock().expect("view").clone();
-                if let Some(pressed) = job_card(ui, &view, true) {
+                if let Some(pressed) = job_card(ui, &view, false) {
                     action = Some((pressed, job.view.clone()));
                 }
+                ui.add_space(6.0);
+            }
+            for (record, progress) in &self.elsewhere {
+                elsewhere_card(ui, record, progress.as_ref());
                 ui.add_space(6.0);
             }
         }
@@ -643,7 +815,7 @@ impl App {
                             match record.role {
                                 Role::Send => line.push(match &record.code {
                                     Some(code) => format!("code {code}"),
-                                    None => "with a ticket".to_string(),
+                                    None => "with a long code".to_string(),
                                 }),
                                 Role::Receive => {
                                     if let Some(dest) = &record.dest {
@@ -677,6 +849,24 @@ impl App {
             }
             self.scan();
         }
+
+        ui.add_space(10.0);
+        let label = if self.show_history { "Hide history" } else { "Show history" };
+        if ui.button(label).on_hover_text("The last three transfers that ended well on this computer").clicked() {
+            self.show_history = !self.show_history;
+            self.history = self.settings.home.history();
+        }
+        if self.show_history {
+            ui.add_space(4.0);
+            if self.history.is_empty() {
+                ui.label(RichText::new("No transfer has ended on this computer yet.").color(look::weak(ui)));
+            }
+            let now = now_secs();
+            for finished in &self.history {
+                history_card(ui, finished, now);
+                ui.add_space(6.0);
+            }
+        }
     }
 
     /// Continues an unfinished transfer, as `carrick resume` does.
@@ -685,6 +875,7 @@ impl App {
         let role = record.role;
         let home = self.settings.home.clone();
         let (ask, answers) = recv::answers();
+        let (go, turn) = tokio::sync::watch::channel(self.line_is_free());
         let mut job = Job::start(
             self.runtime(),
             ctx,
@@ -693,12 +884,16 @@ impl App {
             move |r, _| r.id == id,
             move |events, stop| async move {
                 match role {
-                    Role::Send => send::resume_send(&home, record, events, stop).await.map(Finish::Sent),
+                    Role::Send => send::resume_send(&home, record, Some(turn), events, stop).await.map(Finish::Sent),
                     Role::Receive => recv::resume_receive(&home, record, Some(answers), events, stop).await.map(Finish::Received),
                 }
             },
         );
         job.answer = Some(ask);
+        if role == Role::Send {
+            job.turn = Some(go);
+            job.place = self.next_place();
+        }
         self.jobs.insert(0, job);
         self.scan();
     }
@@ -706,6 +901,7 @@ impl App {
     /// Does what a button of a transfer card asks.
     fn act(&mut self, action: CardAction, view: &Arc<Mutex<JobView>>) {
         match action {
+            CardAction::First => self.first(view),
             CardAction::Stop => self.stop(view),
             CardAction::Remove => self.jobs.retain(|j| !Arc::ptr_eq(&j.view, view)),
             CardAction::Answer(choice) => {
@@ -817,6 +1013,42 @@ fn open_in_system(path: &Path) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
+/// The arrow that opens the recent folders, and the cross that takes one off.
+const RECENT_ICON: &str = "⏷";
+const REMOVE_ICON: &str = "🗙";
+
+/// Where the window remembers the folders received into lately.
+fn folders_file(home: &carrick_core::home::Home) -> PathBuf {
+    home.root().join("carrick-gui.folders")
+}
+
+/// The folders received into lately, newest first: one per line.
+fn read_folders(home: &carrick_core::home::Home) -> Vec<PathBuf> {
+    std::fs::read_to_string(folders_file(home))
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .take(RECENT_FOLDERS)
+        .collect()
+}
+
+fn write_folders(home: &carrick_core::home::Home, folders: &[PathBuf]) {
+    let body: String = folders.iter().map(|f| format!("{}\n", f.display())).collect();
+    let _ = std::fs::write(folders_file(home), body);
+}
+
+/// Whether two folders are the same one: on Windows, letter case and a
+/// trailing separator do not make another folder.
+fn same_folder(a: &str, b: &str) -> bool {
+    let tidy = |s: &str| {
+        let s = s.trim().trim_end_matches(['\\', '/']);
+        if cfg!(windows) { s.to_lowercase() } else { s.to_string() }
+    };
+    tidy(a) == tidy(b)
+}
+
 /// Where the window remembers light, dark or system.
 fn theme_file(home: &carrick_core::home::Home) -> PathBuf {
     home.root().join("carrick-gui.theme")
@@ -856,13 +1088,34 @@ fn column(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 /// What a button on a transfer card asks for.
+#[cfg(test)]
+mod tests {
+    use super::same_folder;
+
+    #[test]
+    fn a_folder_is_the_same_with_or_without_a_final_separator() {
+        assert!(same_folder("C:\\Users\\x\\Downloads", "C:\\Users\\x\\Downloads\\"));
+        assert!(!same_folder("C:\\Users\\x\\Downloads", "C:\\Users\\x\\Documents"));
+        #[cfg(windows)]
+        assert!(same_folder("C:\\Users\\X\\downloads", "c:\\users\\x\\Downloads"));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardAction {
+    /// Send this before the others in line.
+    First,
     Stop,
     /// Take a finished transfer off the list of this window.
     Remove,
     /// The answer about files that already exist.
     Answer(Existing),
+}
+
+/// A send someone already has in full: it stays on offer for latecomers
+/// but no longer holds up the sends behind it.
+fn served(view: &JobView) -> bool {
+    view.receivers.iter().any(|r| r.done)
 }
 
 /// How the choice about files that already exist reads.
@@ -920,7 +1173,7 @@ fn job_card(ui: &mut Ui, view: &JobView, removable: bool) -> Option<CardAction> 
         }
         status(ui, view);
         if let Some(fraction) = view.fraction() {
-            ui.add(egui::ProgressBar::new(fraction).desired_height(14.0).show_percentage());
+            look::progress(ui, fraction, 14.0, true);
         }
         if !view.phase.is_over() {
             if let Some(route) = view.route {
@@ -933,10 +1186,10 @@ fn job_card(ui: &mut Ui, view: &JobView, removable: bool) -> Option<CardAction> 
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Receiver {}", r.id)).monospace());
                     match r.route {
-                        Some(Route::Direct) => ui.label(RichText::new("direct").color(look::good(ui))),
-                        Some(Route::Relay) => ui.label(RichText::new("through a relay").color(look::caution(ui))),
-                        None => ui.label(""),
-                    };
+                        Some(Route::Direct) => look::chip(ui, "direct", look::good(ui)),
+                        Some(Route::Relay) => look::chip(ui, "through a relay", look::caution(ui)),
+                        None => {}
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if r.done {
                             ui.label(RichText::new("has everything").color(look::good(ui)));
@@ -950,7 +1203,7 @@ fn job_card(ui: &mut Ui, view: &JobView, removable: bool) -> Option<CardAction> 
                 let pace = view.receiver_pace.get(&r.id);
                 let now = Instant::now();
                 if r.connected && !r.done {
-                    ui.add(egui::ProgressBar::new(fmt::fraction(r.have, r.total)).desired_height(10.0));
+                    look::progress(ui, fmt::fraction(r.have, r.total), 8.0, false);
                     if let Some(left) = pace.and_then(|p| p.left(r.have, r.total, now)) {
                         ui.label(RichText::new(format!("{} left", fmt::eta(left))).color(look::weak(ui)));
                     }
@@ -980,7 +1233,19 @@ fn job_card(ui: &mut Ui, view: &JobView, removable: bool) -> Option<CardAction> 
         }
         ui.add_space(2.0);
         if !view.phase.is_over() {
-            ui.add_enabled(!view.stopping, egui::Button::new("Stop")).clicked().then_some(CardAction::Stop)
+            ui.horizontal(|ui| {
+                let mut pressed = None;
+                if matches!(view.phase, Phase::Queued | Phase::Paused)
+                    && ui.button("Send this first").on_hover_text("Goes before the others in line; the one sending now pauses and carries on after").clicked()
+                {
+                    pressed = Some(CardAction::First);
+                }
+                if ui.add_enabled(!view.stopping, egui::Button::new("Stop")).clicked() {
+                    pressed = Some(CardAction::Stop);
+                }
+                pressed
+            })
+            .inner
         } else if removable {
             ui.button("Remove from list").clicked().then_some(CardAction::Remove)
         } else {
@@ -1005,10 +1270,16 @@ fn status(ui: &mut Ui, view: &JobView) {
         Phase::Preparing { done, total } => {
             ui.label(format!("Preparing: {} of {}", fmt::bytes(*done), fmt::bytes(*total)));
         }
+        Phase::Queued => {
+            ui.label(RichText::new("In line: it starts by itself when the send before it is done.").color(look::caution(ui)));
+        }
+        Phase::Paused => {
+            ui.label(RichText::new("Paused: another send goes first. It carries on by itself after; its receivers wait.").color(look::caution(ui)));
+        }
         Phase::Offering => {
             let waiting = view.receivers.iter().all(|r| !r.connected || r.done);
             if view.receivers.is_empty() {
-                let key = if view.code.is_some() { "the code" } else { "the ticket" };
+                let key = if view.code.is_some() { "the code" } else { "the long code" };
                 ui.label(format!("Waiting for someone to enter {key}. Keep Carrick open until they have everything."));
             } else if waiting {
                 let done = view.receivers.iter().filter(|r| r.done).count();
@@ -1072,6 +1343,198 @@ fn status(ui: &mut Ui, view: &JobView) {
     }
 }
 
+/// One transfer of the history: what it was, when, how long it took and how
+/// fast it went.
+fn history_card(ui: &mut Ui, f: &Finished, now: u64) {
+    look::card(ui, |ui| {
+        let what = match f.role {
+            Role::Send => "Sent",
+            Role::Receive => "Received",
+        };
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(format!("{}, {}", fmt::files(f.files), fmt::bytes(f.bytes))).color(look::weak(ui)));
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(format!("{what} {}", f.name)).strong().size(16.0)).truncate());
+                });
+            });
+        });
+        let seconds = f.ended.saturating_sub(f.started);
+        let mut line = vec![fmt::ago(now.saturating_sub(f.ended))];
+        if seconds > 0 {
+            line.push(format!("took {}", fmt::took(seconds)));
+            if f.moved > 0 {
+                line.push(format!("average {}/s", fmt::bytes(f.moved / seconds)));
+            }
+        }
+        match f.direct {
+            Some(true) => line.push("direct".into()),
+            Some(false) => line.push("through a relay".into()),
+            None => {}
+        }
+        ui.label(line.join("  ·  "));
+        let mut more = Vec::new();
+        match f.role {
+            Role::Receive => {
+                if let Some(dest) = &f.dest {
+                    more.push(format!("Saved in {}", dest.display()));
+                }
+            }
+            Role::Send => more.push(if f.receivers == 1 {
+                "1 receiver got everything".to_string()
+            } else {
+                format!("{} receivers got everything", f.receivers)
+            }),
+        }
+        if f.moved < f.bytes {
+            more.push(format!("{} travelled; the rest was already there", fmt::bytes(f.moved)));
+        }
+        ui.add(egui::Label::new(RichText::new(more.join(" · ")).small().color(look::weak(ui))).truncate());
+    });
+}
+
+/// A transfer another Carrick on this computer is running: where it stands,
+/// as it last wrote it. No buttons: it is stopped where it runs.
+fn elsewhere_card(ui: &mut Ui, record: &Record, progress: Option<&Progress>) {
+    look::card(ui, |ui| {
+        let name = progress.map(|p| p.name.as_str()).filter(|n| !n.is_empty()).unwrap_or(&record.name);
+        let name = if name.is_empty() { "…" } else { name };
+        let files = progress.map(|p| p.files).filter(|f| *f > 0).unwrap_or(record.files);
+        let total = progress.map(|p| p.total).filter(|t| *t > 0).unwrap_or(record.total_bytes);
+        let what = match record.role {
+            Role::Send => "Sending",
+            Role::Receive => "Receiving",
+        };
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if total > 0 || files > 0 {
+                    ui.label(RichText::new(format!("{}, {}", fmt::files(files), fmt::bytes(total))).color(look::weak(ui)));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(format!("{what} {name}")).strong().size(16.0)).truncate());
+                });
+            });
+        });
+        let terminal = progress.is_none_or(|p| p.program == "carrick");
+        ui.label(
+            RichText::new(if terminal {
+                "In a terminal on this computer. Ctrl+C there stops it."
+            } else {
+                "In another Carrick window on this computer."
+            })
+            .color(look::weak(ui)),
+        );
+        let Some(p) = progress else { return };
+        let now = now_secs();
+        let moved = if p.receivers.is_empty() { p.have } else { p.receivers.iter().map(|r| r.have).sum() };
+        let average = p.since.and_then(|since| {
+            let seconds = now.saturating_sub(since);
+            (seconds >= 2 && moved > p.since_have).then(|| (moved - p.since_have) as f64 / seconds as f64)
+        });
+        match &p.stage {
+            Stage::Starting => {
+                ui.label("Starting…");
+            }
+            Stage::Preparing => {
+                ui.label(format!("Preparing: {} of {}", fmt::bytes(p.have), fmt::bytes(p.total)));
+            }
+            Stage::Queued => {
+                ui.label("In line behind another send.");
+            }
+            Stage::Paused => {
+                ui.label("Paused while another send goes first.");
+            }
+            Stage::Offering => {
+                let busy = p.receivers.iter().filter(|r| r.connected && !r.done).count();
+                let done = p.receivers.iter().filter(|r| r.done).count();
+                ui.label(match (busy, done) {
+                    (0, 0) => "Waiting for someone to enter the code.".to_string(),
+                    (0, done) => format!("{done} of {} receivers have everything. Still on offer.", p.receivers.len()),
+                    (1, _) => "Sending to 1 receiver".to_string(),
+                    (busy, _) => format!("Sending to {busy} receivers"),
+                });
+            }
+            Stage::Looking => {
+                ui.label("Looking for the sender…");
+            }
+            Stage::Checking => {
+                ui.label("Checking what is already here");
+            }
+            Stage::Receiving => {
+                let mut line = format!("{} of {}", fmt::bytes(p.have), fmt::bytes(p.total));
+                if let Some(speed) = average {
+                    let left = p.total.saturating_sub(p.have) as f64 / speed;
+                    line.push_str(&format!("  ·  {} left", fmt::eta(Duration::from_secs_f64(left))));
+                }
+                ui.label(line);
+            }
+            Stage::Waiting { reason } => {
+                ui.label(RichText::new(format!("Interrupted: {reason}. Trying again by itself…")).color(look::caution(ui)));
+            }
+            Stage::Asking => {
+                ui.label(RichText::new("Some files already exist with different content: it is waiting for an answer there.").color(look::caution(ui)));
+            }
+            Stage::Saving { done, total } => {
+                ui.label(format!("Saving files: {done} of {total}"));
+            }
+        }
+        let fraction = match &p.stage {
+            Stage::Preparing | Stage::Checking | Stage::Receiving | Stage::Waiting { .. } => Some(fmt::fraction(p.have, p.total)),
+            Stage::Saving { done, total } => Some(fmt::fraction(*done, *total)),
+            _ => None,
+        };
+        if let Some(fraction) = fraction {
+            look::progress(ui, fraction, 14.0, true);
+        }
+        if record.role == Role::Receive {
+            match p.direct {
+                Some(true) => route_line(ui, Route::Direct),
+                Some(false) => route_line(ui, Route::Relay),
+                None => {}
+            }
+        }
+        for r in &p.receivers {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Receiver {}", r.id)).monospace());
+                match r.direct {
+                    Some(true) => look::chip(ui, "direct", look::good(ui)),
+                    Some(false) => look::chip(ui, "through a relay", look::caution(ui)),
+                    None => {}
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if r.done {
+                        ui.label(RichText::new("has everything").color(look::good(ui)));
+                    } else if !r.connected {
+                        ui.label(RichText::new("disconnected").color(look::weak(ui)));
+                    } else {
+                        ui.label(RichText::new(format!("{} of {}", fmt::bytes(r.have), fmt::bytes(r.total))).color(look::weak(ui)));
+                    }
+                });
+            });
+            if r.connected && !r.done {
+                look::progress(ui, fmt::fraction(r.have, r.total), 8.0, false);
+            }
+        }
+        let mut parts = Vec::new();
+        if let Some(speed) = p.speed {
+            parts.push(format!("Now {}/s", fmt::bytes(speed as u64)));
+        }
+        if let Some(speed) = average {
+            parts.push(format!("average {}/s", fmt::bytes(speed as u64)));
+        }
+        if let Some(since) = p.since {
+            parts.push(format!("{} so far", fmt::eta(Duration::from_secs(now.saturating_sub(since)))));
+        }
+        if !parts.is_empty() {
+            let mut text = parts.join("  ·  ");
+            if let Some(first) = text.get(0..1) {
+                text = first.to_uppercase() + &text[1..];
+            }
+            ui.add(egui::Label::new(RichText::new(text).color(look::weak(ui))).truncate());
+        }
+    });
+}
+
 /// The speed now, the average since the copy began, and the time it has
 /// taken: while it runs, and frozen once it ends.
 fn pace_line(ui: &mut Ui, pace: &Pace, at: Instant) {
@@ -1096,12 +1559,15 @@ fn pace_line(ui: &mut Ui, pace: &Pace, at: Instant) {
 }
 
 fn route_line(ui: &mut Ui, route: Route) {
-    match route {
-        Route::Direct => look::dot_label(ui, look::good(ui), "Direct, computer to computer"),
-        Route::Relay => look::dot_label(
-            ui,
-            look::caution(ui),
-            "Through a relay, still encrypted end to end. The free public relays are slow on purpose.",
-        ),
-    }
+    ui.horizontal_wrapped(|ui| match route {
+        Route::Direct => look::chip(ui, "Direct, computer to computer", look::good(ui)),
+        Route::Relay => {
+            look::chip(ui, "Through a relay", look::caution(ui));
+            ui.label(
+                RichText::new("still encrypted end to end. The free public relays are slow on purpose.")
+                    .small()
+                    .color(look::weak(ui)),
+            );
+        }
+    });
 }

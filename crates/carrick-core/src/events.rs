@@ -16,6 +16,19 @@ pub enum Event {
     // ---- sending ----
     /// Fingerprinting the files before they can be offered.
     Hashing { done: u64, total: u64 },
+    /// Prepared, and waiting for its turn behind another send: not on the
+    /// network yet. A code is already good to give; a ticket comes with
+    /// `Ready`, because it carries addresses only known then.
+    Queued {
+        id: String,
+        code: Option<String>,
+        name: String,
+        files: u64,
+        total: u64,
+    },
+    /// Taken off the network for now, to let another send go first; it
+    /// comes back by itself. Receivers wait and then carry on.
+    Paused,
     /// The transfer is on offer.
     Ready {
         id: String,
@@ -54,6 +67,10 @@ pub enum Event {
     /// Anything else worth a line.
     Note(String),
 }
+
+/// Whether a send may be on the network now. Whoever keeps a line of sends
+/// holds the other end; a send without one goes on at once.
+pub type Turn = tokio::sync::watch::Receiver<bool>;
 
 pub type EventTx = tokio::sync::mpsc::UnboundedSender<Event>;
 pub type EventRx = tokio::sync::mpsc::UnboundedReceiver<Event>;

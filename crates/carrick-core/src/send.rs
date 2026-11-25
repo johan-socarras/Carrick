@@ -22,12 +22,13 @@ use walkdir::WalkDir;
 
 use crate::{
     access::{Code, SenderKeys, Ticket},
-    events::{emit, Event, EventTx},
+    events::{emit, Event, EventTx, Turn},
     gate::Gate,
     home::{decode_key, now_secs, Home, Record, Role, State},
     manifest::{manifest_path, FileEntry, Manifest, MANIFEST_FORMAT},
     net::{self, NetOptions, RelayChoice},
     proto::ALPN,
+    running,
 };
 
 const ROOT_TAG: &str = "carrick-root";
@@ -44,6 +45,9 @@ pub struct SendOptions {
     /// Stop once this many receivers have everything. `None`: serve until stopped.
     pub receivers: Option<u32>,
     pub net: NetOptions,
+    /// When to be on the network, for a send that waits in line behind
+    /// others. `None`: at once, and all the time.
+    pub turn: Option<Turn>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +305,8 @@ pub async fn send(home: &Home, opts: SendOptions, events: EventTx, stop: Cancell
     };
 
     let id = new_id();
+    let claim = home.claim(&id)?;
+    let (events, watching) = running::watch(home, &id, events);
     let store_dir = home.transfer_dir(&id).join("store");
     let mut record = Record {
         id: id.clone(),
@@ -338,6 +344,7 @@ pub async fn send(home: &Home, opts: SendOptions, events: EventTx, stop: Cancell
         res = import(&store, name, files, empty_dirs, &events) => res,
         _ = stop.cancelled() => {
             store.shutdown().await.ok();
+            drop(claim);
             home.remove(&id)?;
             return Ok(SendOutcome::Stopped { receivers: 0 });
         }
@@ -346,6 +353,7 @@ pub async fn send(home: &Home, opts: SendOptions, events: EventTx, stop: Cancell
         Ok(v) => v,
         Err(e) => {
             store.shutdown().await.ok();
+            drop(claim);
             home.remove(&id)?;
             return Err(e);
         }
@@ -353,12 +361,20 @@ pub async fn send(home: &Home, opts: SendOptions, events: EventTx, stop: Cancell
     record.root = Some(root.to_hex().to_string());
     home.save(&mut record)?;
 
-    serve(home, record, store, root, manifest, opts.net, events, stop).await
+    let outcome = serve(home, record, store, root, manifest, opts.net, opts.turn, events, stop).await;
+    if matches!(outcome, Ok(SendOutcome::Completed { .. })) {
+        watching.remember(home, &id);
+    }
+    drop(claim);
+    outcome
 }
 
 /// Serves again a transfer prepared earlier, e.g. after a restart.
-pub async fn resume_send(home: &Home, record: Record, events: EventTx, stop: CancellationToken) -> Result<SendOutcome> {
+pub async fn resume_send(home: &Home, record: Record, turn: Option<Turn>, events: EventTx, stop: CancellationToken) -> Result<SendOutcome> {
     ensure!(record.role == Role::Send, "transfer {} is not a send", record.id);
+    let _claim = home.claim(&record.id)?;
+    let (events, watching) = running::watch(home, &record.id, events);
+    let id = record.id.clone();
     let root_hex = record
         .root
         .clone()
@@ -377,7 +393,53 @@ pub async fn resume_send(home: &Home, record: Record, events: EventTx, stop: Can
         relay: RelayChoice::from_setting(record.relay.as_deref())?,
         ..NetOptions::from_env()?
     };
-    serve(home, record, store, root, manifest, net, events, stop).await
+    let outcome = serve(home, record, store, root, manifest, net, turn, events, stop).await;
+    if matches!(outcome, Ok(SendOutcome::Completed { .. })) {
+        watching.remember(home, &id);
+    }
+    outcome
+}
+
+fn has_turn(turn: &Option<Turn>) -> bool {
+    turn.as_ref().is_none_or(|t| *t.borrow())
+}
+
+/// Waits until it is this send's turn. False if it was stopped first.
+async fn wait_for_turn(turn: &mut Option<Turn>, stop: &CancellationToken) -> bool {
+    let Some(t) = turn else { return true };
+    tokio::select! {
+        // Whoever kept the line is gone: nothing holds this send back.
+        _ = t.wait_for(|go| *go) => true,
+        _ = stop.cancelled() => false,
+    }
+}
+
+/// Resolves when this send must give way to another.
+async fn turn_taken(turn: &mut Option<Turn>) {
+    match turn {
+        Some(t) => {
+            if t.wait_for(|go| !*go).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Adds the receivers that finished to the record, saving it if any is new.
+fn note_finished(home: &Home, record: &mut Record, gate: &Gate) -> Result<()> {
+    let mut changed = false;
+    for id in gate.finished() {
+        let id = id.to_string();
+        if !record.finished_receivers.contains(&id) {
+            record.finished_receivers.push(id);
+            changed = true;
+        }
+    }
+    if changed {
+        home.save(record)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -388,6 +450,7 @@ async fn serve(
     root: Hash,
     manifest: Manifest,
     net_opts: NetOptions,
+    mut turn: Option<Turn>,
     events: EventTx,
     stop: CancellationToken,
 ) -> Result<SendOutcome> {
@@ -395,93 +458,138 @@ async fn serve(
         endpoint_secret: decode_key(&record.endpoint_secret)?,
         auth_key: decode_key(&record.auth_key)?,
     };
-    let (endpoint, _book) = net::bind(keys.secret_key(), &net_opts).await?;
-    if let Some(note) = net::port_note(&endpoint, &net_opts) {
-        emit(&events, Event::Note(note));
-    }
-    let online = net::wait_online(&endpoint, &net_opts, Duration::from_secs(20)).await;
-    if !online {
-        emit(&events, Event::Note("no relay reachable yet; receivers on this network can still connect".into()));
-    }
-    let gate = Gate::new(endpoint.id(), (*store).clone(), keys.auth_key, *root.as_bytes(), true, events.clone());
-    let router = Router::builder(endpoint.clone()).accept(ALPN, gate.clone()).spawn();
-
-    let ticket = if record.code.is_none() {
-        // A ticket is only useful with an address in it; give the endpoint a
-        // moment to learn its own.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while endpoint.addr().is_empty() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let addr = endpoint.addr();
-        let relay = addr.relay_urls().next().map(|u| u.to_string());
-        let mut addrs: Vec<std::net::SocketAddr> = addr.ip_addrs().copied().collect();
-        // The public address given by hand goes first: it is the one that
-        // works from outside when the router forwards the port.
-        for public in net_opts.public_addrs.iter().rev() {
-            addrs.retain(|a| a != public);
-            addrs.insert(0, *public);
-        }
-        let ticket = Ticket {
-            sender: *endpoint.id().as_bytes(),
-            auth_key: keys.auth_key,
-            root: *root.as_bytes(),
-            relay,
-            addrs,
-        };
-        Some(ticket.encode())
-    } else {
-        None
-    };
-    emit(
-        &events,
-        Event::Ready {
-            id: record.id.clone(),
-            code: record.code.clone(),
-            ticket,
-            name: manifest.name.clone(),
-            files: manifest.files.len() as u64,
-            total: manifest.total_bytes(),
-        },
-    );
-
-    let mut done_watch = gate.watch_done();
+    let mut been_on = false;
+    // Each round puts the transfer on the network until it ends, or until
+    // another send is let go first; then it waits and comes back.
     let outcome = loop {
-        // Remember who finished, so a restart does not count them twice.
-        let finished: Vec<String> = gate.finished().iter().map(|id| id.to_string()).collect();
-        let mut changed = false;
-        for id in finished {
-            if !record.finished_receivers.contains(&id) {
-                record.finished_receivers.push(id);
-                changed = true;
+        if !has_turn(&turn) {
+            emit(
+                &events,
+                if been_on {
+                    Event::Paused
+                } else {
+                    Event::Queued {
+                        id: record.id.clone(),
+                        code: record.code.clone(),
+                        name: manifest.name.clone(),
+                        files: manifest.files.len() as u64,
+                        total: manifest.total_bytes(),
+                    }
+                },
+            );
+            if !wait_for_turn(&mut turn, &stop).await {
+                break SendOutcome::Stopped { receivers: record.finished_receivers.len() as u32 };
             }
         }
-        if changed {
-            home.save(&mut record)?;
-        }
-        let count = record.finished_receivers.len() as u32;
-        if let Some(wanted) = record.receivers_wanted {
-            if count >= wanted {
-                break SendOutcome::Completed { receivers: count };
+        been_on = true;
+        let (endpoint, _book) = match net::bind(keys.secret_key(), &net_opts).await {
+            Ok(v) => v,
+            Err(e) => {
+                store.shutdown().await.ok();
+                return Err(e);
             }
+        };
+        if let Some(note) = net::port_note(&endpoint, &net_opts) {
+            emit(&events, Event::Note(note));
         }
-        tokio::select! {
-            _ = stop.cancelled() => break SendOutcome::Stopped { receivers: count },
-            res = done_watch.changed() => {
-                if res.is_err() {
-                    break SendOutcome::Stopped { receivers: count };
+        let online = net::wait_online(&endpoint, &net_opts, Duration::from_secs(20)).await;
+        if !online {
+            emit(&events, Event::Note("no relay reachable yet; receivers on this network can still connect".into()));
+        }
+        let gate = Gate::new(endpoint.id(), (*store).clone(), keys.auth_key, *root.as_bytes(), true, events.clone());
+        let router = Router::builder(endpoint.clone()).accept(ALPN, gate.clone()).spawn();
+
+        let ticket = if record.code.is_none() {
+            // A ticket is only useful with an address in it; give the endpoint a
+            // moment to learn its own.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while endpoint.addr().is_empty() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let addr = endpoint.addr();
+            let relay = addr.relay_urls().next().map(|u| u.to_string());
+            let mut addrs: Vec<std::net::SocketAddr> = addr.ip_addrs().copied().collect();
+            // The public address given by hand goes first: it is the one that
+            // works from outside when the router forwards the port.
+            for public in net_opts.public_addrs.iter().rev() {
+                addrs.retain(|a| a != public);
+                addrs.insert(0, *public);
+            }
+            let ticket = Ticket {
+                sender: *endpoint.id().as_bytes(),
+                auth_key: keys.auth_key,
+                root: *root.as_bytes(),
+                relay,
+                addrs,
+            };
+            Some(ticket.encode())
+        } else {
+            None
+        };
+        emit(
+            &events,
+            Event::Ready {
+                id: record.id.clone(),
+                code: record.code.clone(),
+                ticket,
+                name: manifest.name.clone(),
+                files: manifest.files.len() as u64,
+                total: manifest.total_bytes(),
+            },
+        );
+
+        let mut done_watch = gate.watch_done();
+        let round = loop {
+            // Remember who finished, so a restart does not count them twice.
+            note_finished(home, &mut record, &gate)?;
+            let count = record.finished_receivers.len() as u32;
+            if let Some(wanted) = record.receivers_wanted {
+                if count >= wanted {
+                    break Some(SendOutcome::Completed { receivers: count });
                 }
             }
+            tokio::select! {
+                _ = stop.cancelled() => break Some(SendOutcome::Stopped { receivers: count }),
+                _ = turn_taken(&mut turn) => break None,
+                res = done_watch.changed() => {
+                    if res.is_err() {
+                        break Some(SendOutcome::Stopped { receivers: count });
+                    }
+                }
+            }
+        };
+        // Look once more at who finished: one may have just now.
+        note_finished(home, &mut record, &gate)?;
+        if matches!(round, Some(SendOutcome::Completed { .. })) {
+            // Let the last receiver's final messages drain before closing.
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        let _ = tokio::time::timeout(Duration::from_secs(5), router.shutdown()).await;
+        // Let go of the port too, so the next round can take the same one.
+        let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.close()).await;
+        match round {
+            Some(outcome) => break outcome,
+            None => continue,
+        }
+    };
+    // Offered to anyone until stopped, and someone got everything: stopping
+    // ends it. Left unfinished, it would be offered again for nobody.
+    let outcome = match outcome {
+        SendOutcome::Stopped { .. } => {
+            let receivers = record.finished_receivers.len() as u32;
+            if receivers > 0 && record.receivers_wanted.is_none() {
+                SendOutcome::Completed { receivers }
+            } else {
+                SendOutcome::Stopped { receivers }
+            }
+        }
+        other => other,
     };
 
     if matches!(outcome, SendOutcome::Completed { .. }) {
-        // Let the last receiver's final messages drain before closing.
-        tokio::time::sleep(Duration::from_millis(500)).await;
         record.state = State::Done;
         home.save(&mut record)?;
     }
-    let _ = tokio::time::timeout(Duration::from_secs(5), router.shutdown()).await;
     store.shutdown().await.ok();
     if record.state == State::Done {
         // The fingerprints are of no use once the transfer is over.

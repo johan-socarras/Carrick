@@ -51,6 +51,7 @@ use crate::{
     manifest::{local_path, FileEntry, Manifest},
     net::{self, NetOptions, RelayChoice},
     proto::{self, ClientMsg, Hello, Peer, Reply, ServerMsg, Welcome, ALPN},
+    running,
     send::{first_child, load_listing},
 };
 
@@ -134,8 +135,11 @@ pub async fn receive(home: &Home, opts: ReceiveOptions, events: EventTx, stop: C
     let dest = std::path::absolute(&opts.dest)
         .with_context(|| format!("{} is not a usable folder", opts.dest.display()))?;
 
+    let claim;
     let record = match home.load(&id)? {
         Some(existing) if existing.state == State::Active => {
+            // Running elsewhere on this computer: say so, whatever the folder.
+            claim = home.claim(&id)?;
             let previous = existing.dest.clone().unwrap_or_default();
             if previous != dest {
                 bail!(
@@ -150,6 +154,7 @@ pub async fn receive(home: &Home, opts: ReceiveOptions, events: EventTx, stop: C
             if other.is_some() {
                 home.remove(&id)?;
             }
+            claim = home.claim(&id)?;
             use rand::RngExt;
             let secret: [u8; 32] = rand::rng().random();
             let mut record = Record {
@@ -180,19 +185,32 @@ pub async fn receive(home: &Home, opts: ReceiveOptions, events: EventTx, stop: C
             record
         }
     };
-    run(home, record, access, opts.net, opts.seed, opts.answers, events, stop).await
+    let (events, watching) = running::watch(home, &id, events);
+    let outcome = run(home, record, access, opts.net, opts.seed, opts.answers, events, stop).await;
+    if matches!(outcome, Ok(ReceiveOutcome::Completed { .. })) {
+        watching.remember(home, &id);
+    }
+    drop(claim);
+    outcome
 }
 
 /// Continues a receive from its record, e.g. after a restart.
 pub async fn resume_receive(home: &Home, record: Record, answers: Option<Answers>, events: EventTx, stop: CancellationToken) -> Result<ReceiveOutcome> {
     anyhow::ensure!(record.role == Role::Receive, "transfer {} is not a receive", record.id);
+    let _claim = home.claim(&record.id)?;
+    let (events, watching) = running::watch(home, &record.id, events);
+    let id = record.id.clone();
     let key = record.key.clone().context("the transfer record has no code or ticket")?;
     let access = tokio::task::spawn_blocking(move || Access::parse(&key)).await??;
     let net = NetOptions {
         relay: RelayChoice::from_setting(record.relay.as_deref())?,
         ..NetOptions::from_env()?
     };
-    run(home, record, access, net, false, answers, events, stop).await
+    let outcome = run(home, record, access, net, false, answers, events, stop).await;
+    if matches!(outcome, Ok(ReceiveOutcome::Completed { .. })) {
+        watching.remember(home, &id);
+    }
+    outcome
 }
 
 /// The other receivers of this transfer that can be asked for pieces.
@@ -854,6 +872,13 @@ impl Session<'_> {
             let path = local_path(&self.dest, dir)?;
             std::fs::create_dir_all(&path).with_context(|| format!("cannot create {}", path.display()))?;
         }
+        // Windows keeps these hidden; the transfer does not carry attributes,
+        // so they are hidden again here, also when they were already in place.
+        for (index, file) in manifest.files.iter().enumerate() {
+            if is_hidden_by_windows(&file.path) && !self.skip.contains(&index) {
+                hide_as_windows_does(&local_path(&self.dest, &file.path)?);
+            }
+        }
         emit(&self.events, Event::Saving { done: total, total });
         self.home.save(&mut self.record)?;
         Ok(())
@@ -999,6 +1024,36 @@ fn human(bytes: u64) -> String {
 }
 
 /// Marks the working folder hidden on Windows; elsewhere the dot does it.
+/// Files Windows keeps hidden in folders: a folder's settings (its icon,
+/// its view) and its thumbnails. Arriving visible, they clutter the folder.
+fn is_hidden_by_windows(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name == "desktop.ini" || name == "thumbs.db"
+}
+
+/// Marks a file hidden and system, as Windows marks those files.
+fn hide_as_windows_does(path: &Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM, INVALID_FILE_ATTRIBUTES,
+        };
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives both calls.
+        unsafe {
+            let now = GetFileAttributesW(wide.as_ptr());
+            if now != INVALID_FILE_ATTRIBUTES {
+                SetFileAttributesW(wide.as_ptr(), now | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
+}
+
 fn hide(path: &Path) {
     #[cfg(windows)]
     {

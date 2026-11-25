@@ -12,7 +12,7 @@ use std::{
 use carrick_core::{
     access::Ticket,
     events::{self, Event, EventRx, Route},
-    home::{Existing, Home, State},
+    home::{Existing, Home, Role, State},
     net::{NetOptions, RelayChoice},
     recv::{self, ReceiveOptions, ReceiveOutcome},
     send::{self, SendOptions, SendOutcome},
@@ -80,7 +80,7 @@ async fn start_sender(home: &Home, paths: Vec<PathBuf>, receivers: Option<u32>) 
         let home = home.clone();
         let stop = stop.clone();
         async move {
-            let opts = SendOptions { paths, ticket: true, receivers, net: offline() };
+            let opts = SendOptions { paths, ticket: true, receivers, net: offline(), turn: None };
             send::send(&home, opts, tx, stop).await
         }
     });
@@ -171,6 +171,197 @@ async fn a_folder_arrives_identical() {
     assert_eq!(routes, vec![Route::Direct]);
     assert!(sender_home.list().unwrap().iter().all(|r| r.state == State::Done));
     assert!(receiver_home.list().unwrap().iter().all(|r| r.state == State::Done));
+}
+
+/// On offer to anyone (no number of receivers), as the window sends: once
+/// someone has everything, stopping ends the send instead of leaving it to
+/// be offered again for nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_a_send_someone_received_ends_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = sample_tree(&tmp.path().join("source"));
+    let sender_home = Home::at(tmp.path().join("home-a")).unwrap();
+    let receiver_home = Home::at(tmp.path().join("home-b")).unwrap();
+    let dest = tmp.path().join("dest");
+
+    let sending = start_sender(&sender_home, vec![source], None).await;
+    let id = sender_home.list().unwrap()[0].id.clone();
+    assert!(sender_home.is_running(&id), "a send on offer is running");
+    let (outcome, _) = receive_all(&receiver_home, &sending.ticket, &dest, false).await;
+    assert!(matches!(outcome.unwrap(), ReceiveOutcome::Completed { .. }));
+    let receive_id = receiver_home.list().unwrap()[0].id.clone();
+    assert!(!receiver_home.is_running(&receive_id), "a finished receive lets go");
+
+    // Stopped right away, maybe before the sender has counted the receiver.
+    sending.stop.cancel();
+    let sent = tokio::time::timeout(WAIT, sending.task).await.unwrap().unwrap().unwrap();
+    assert_eq!(sent, SendOutcome::Completed { receivers: 1 });
+    assert!(sender_home.list().unwrap().iter().all(|r| r.state == State::Done));
+    assert!(!sender_home.is_running(&id));
+}
+
+/// A transfer can only run once on a computer: a second receive of the same
+/// thing, from a terminal while the window has it, say, is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transfer_runs_only_once_on_a_computer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = sample_tree(&tmp.path().join("source"));
+    let sender_home = Home::at(tmp.path().join("home-a")).unwrap();
+    let receiver_home = Home::at(tmp.path().join("home-b")).unwrap();
+    let dest = tmp.path().join("dest");
+
+    let sending = start_sender(&sender_home, vec![source], Some(1)).await;
+    let (outcome, _) = receive_all(&receiver_home, &sending.ticket, &dest, false).await;
+    assert!(matches!(outcome.unwrap(), ReceiveOutcome::Completed { .. }));
+    let record = receiver_home.list().unwrap().remove(0);
+
+    // As if another program held it: a second receive is refused, and
+    // forgetting it is too.
+    let held = receiver_home.claim(&record.id).unwrap();
+    let mut again = record.clone();
+    again.state = State::Active;
+    let (tx, _rx) = events::channel();
+    let error = recv::resume_receive(&receiver_home, again, None, tx, CancellationToken::new()).await.unwrap_err();
+    assert!(format!("{error:#}").contains("already running"), "{error:#}");
+    assert!(format!("{:#}", receiver_home.forget(&record.id).unwrap_err()).contains("running"));
+    drop(held);
+    assert!(receiver_home.forget(&record.id).unwrap());
+    let _ = tokio::time::timeout(WAIT, sending.task).await;
+}
+
+/// A send in line is off the network until its turn, and says so; one that
+/// gives way to another goes off and comes back, and its receiver carries on
+/// by itself. Both ends then keep the transfer in their history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_waits_its_turn_and_can_give_way() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = sample_tree(&tmp.path().join("source"));
+    let sender_home = Home::at(tmp.path().join("home-a")).unwrap();
+    let receiver_home = Home::at(tmp.path().join("home-b")).unwrap();
+    let dest = tmp.path().join("dest");
+    // A fixed port, so the ticket still points at the sender when it comes back.
+    let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let net = NetOptions { port: Some(port), ..offline() };
+
+    // A send that never gets its turn: in line, with no ticket yet.
+    let (_hold, waiting) = tokio::sync::watch::channel(false);
+    let (tx, mut rx) = events::channel();
+    let stop_queued = CancellationToken::new();
+    let queued = tokio::spawn({
+        let home = sender_home.clone();
+        let stop = stop_queued.clone();
+        let opts = SendOptions { paths: vec![source.clone()], ticket: true, receivers: None, net: offline(), turn: Some(waiting) };
+        async move { send::send(&home, opts, tx, stop).await }
+    });
+    loop {
+        match tokio::time::timeout(WAIT, rx.recv()).await.expect("the send said it is in line").unwrap() {
+            Event::Queued { name, .. } => {
+                assert_eq!(name, "photos");
+                break;
+            }
+            Event::Ready { .. } => panic!("a send in line went on the network"),
+            _ => {}
+        }
+    }
+    stop_queued.cancel();
+    assert_eq!(queued.await.unwrap().unwrap(), SendOutcome::Stopped { receivers: 0 });
+
+    // A send with its turn, which then gives way.
+    let (go, turn) = tokio::sync::watch::channel(true);
+    let (tx, mut rx) = events::channel();
+    let sending = tokio::spawn({
+        let home = sender_home.clone();
+        let opts = SendOptions { paths: vec![source], ticket: true, receivers: Some(1), net, turn: Some(turn) };
+        async move { send::send(&home, opts, tx, CancellationToken::new()).await }
+    });
+    let ticket = loop {
+        if let Event::Ready { ticket: Some(ticket), .. } = tokio::time::timeout(WAIT, rx.recv()).await.unwrap().unwrap() {
+            break ticket;
+        }
+    };
+    go.send(false).unwrap();
+    loop {
+        if let Event::Paused = tokio::time::timeout(WAIT, rx.recv()).await.expect("the send paused").unwrap() {
+            break;
+        }
+    }
+    let seen = collect(rx);
+    let receiving = tokio::spawn({
+        let home = receiver_home.clone();
+        let dest = dest.clone();
+        async move { receive_all(&home, &ticket, &dest, false).await.0 }
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!receiving.is_finished(), "received from a paused send");
+
+    go.send(true).unwrap();
+    let outcome = tokio::time::timeout(WAIT, receiving).await.unwrap().unwrap();
+    assert!(matches!(outcome.unwrap(), ReceiveOutcome::Completed { files: 6, .. }));
+    assert_eq!(snapshot(&tmp.path().join("source")), snapshot(&dest));
+    let sent = tokio::time::timeout(WAIT, sending).await.unwrap().unwrap().unwrap();
+    assert_eq!(sent, SendOutcome::Completed { receivers: 1 });
+    assert!(seen.lock().unwrap().iter().any(|e| matches!(e, Event::Ready { .. })), "it came back on the network");
+
+    let sent = sender_home.history();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!((sent[0].role, sent[0].name.as_str(), sent[0].files, sent[0].receivers), (Role::Send, "photos", 6, 1));
+    let got = receiver_home.history();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!((got[0].role, got[0].files, got[0].dest.as_deref()), (Role::Receive, 6, Some(dest.as_path())));
+    assert_eq!(got[0].direct, Some(true));
+    assert!(got[0].ended >= got[0].started);
+}
+
+/// The history keeps the last three, newest first.
+#[test]
+fn the_history_keeps_the_last_three() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Home::at(tmp.path()).unwrap();
+    for n in 0..5u64 {
+        home.remember(carrick_core::running::Finished {
+            role: Role::Receive,
+            name: format!("t{n}"),
+            files: 1,
+            bytes: n,
+            moved: n,
+            started: n,
+            ended: n,
+            dest: None,
+            receivers: 0,
+            direct: None,
+        });
+    }
+    let names: Vec<String> = home.history().into_iter().map(|f| f.name).collect();
+    assert_eq!(names, ["t4", "t3", "t2"]);
+}
+
+/// A folder's hidden desktop.ini arrives hidden, not as a stray file.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hidden_desktop_ini_stays_hidden() {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    const SYSTEM: u32 = 0x4;
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source").join("videos");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("clip.bin"), b"a video").unwrap();
+    let ini = source.join("desktop.ini");
+    std::fs::write(&ini, "[.ShellClassInfo]\r\nIconResource=shell32.dll,3\r\n").unwrap();
+    let status = std::process::Command::new("attrib").args(["+h", "+s"]).arg(&ini).status().unwrap();
+    assert!(status.success());
+    let sender_home = Home::at(tmp.path().join("home-a")).unwrap();
+    let receiver_home = Home::at(tmp.path().join("home-b")).unwrap();
+    let dest = tmp.path().join("dest");
+
+    let sending = start_sender(&sender_home, vec![source], Some(1)).await;
+    let (outcome, _) = receive_all(&receiver_home, &sending.ticket, &dest, false).await;
+    assert!(matches!(outcome.unwrap(), ReceiveOutcome::Completed { .. }));
+    let arrived = std::fs::metadata(dest.join("videos/desktop.ini")).unwrap().file_attributes();
+    assert_eq!(arrived & (HIDDEN | SYSTEM), HIDDEN | SYSTEM, "attributes {arrived:#x}");
+    let clip = std::fs::metadata(dest.join("videos/clip.bin")).unwrap().file_attributes();
+    assert_eq!(clip & HIDDEN, 0, "an ordinary file came out hidden");
+    let _ = tokio::time::timeout(WAIT, sending.task).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

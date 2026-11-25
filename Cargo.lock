@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "carrick"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "carrick-core",
@@ -832,11 +832,12 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "carrick-core"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -868,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "carrick-gui"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "carrick-core",

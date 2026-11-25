@@ -13,6 +13,7 @@ use carrick_core::{
     events::Route,
     home::{now_secs, Home, Record, Role as Way, State},
     net::NetOptions,
+    running::{Progress, Stage},
 };
 use carrick_gui::{job::Phase, Screen};
 
@@ -31,14 +32,18 @@ fn a_folder_goes_from_one_window_to_another() {
     drop_on(&mut sender, &[source.clone()]);
     assert_eq!(sender.state().send.paths, vec![source.clone()]);
     assert!(shows(&sender, "photos"));
-    tick(&mut sender, "Use a ticket instead of a code (works without Internet)");
+    tick(&mut sender, "No Internet? Use a long code instead of four words");
     button(&mut sender, "Start sending");
     wait(&mut sender, "the ticket", |app| sending(app).ticket.is_some());
-    assert!(shows(&sender, "paste this ticket"));
+    assert!(shows(&sender, "paste this long code"));
     let ticket = copy_with(&mut sender, "Copy");
     assert_eq!(Some(ticket.clone()), sending(sender.state()).ticket);
     settle(&mut sender);
     assert!(shows(&sender, "Copied"));
+    // And the whole command, for a terminal.
+    assert_eq!(copy_with(&mut sender, "Copy command"), format!("carrick receive {ticket}"));
+    settle(&mut sender);
+    assert!(shows(&sender, "Command copied"));
 
     // Receiver: the ticket is pasted and a folder typed in.
     tab(&mut receiver, "Receive");
@@ -64,13 +69,87 @@ fn a_folder_goes_from_one_window_to_another() {
     assert_eq!(view.receivers[0].route, Some(Route::Direct));
     assert_eq!(view.phase, Phase::Offering, "stays on offer until stopped");
 
-    // Both show it under Transfers.
+    // Under Transfers only what is being copied: the receive has ended and is
+    // in the history; the send is still on offer.
     tab(&mut receiver, "Transfers");
-    assert!(shows(&receiver, "Done: saved in"));
+    assert!(shows(&receiver, "Nothing is being copied right now."), "{:?}", painted(&receiver));
+    button(&mut receiver, "Show history");
+    assert_eq!(receiver.state().history.len(), 1);
+    for text in ["Received photos", "5 files", "Saved in", "direct"] {
+        assert!(shows(&receiver, text), "{text} is not in the history: {:?}", painted(&receiver));
+    }
     tab(&mut sender, "Transfers");
     assert!(shows(&sender, "has everything"));
 
+    // Someone has everything: stopping ends the send, and it is not left
+    // under Unfinished to be offered again.
+    button(&mut sender, "Stop");
+    wait(&mut sender, "the send to end", |app| sending(app).phase.is_over());
+    assert_eq!(sending(sender.state()).phase, Phase::Done);
+    assert!(!shows(&sender, "has everything"), "an ended send is still under Transfers");
+    tab(&mut sender, "Send");
+    assert!(shows(&sender, "Done: 1 receiver has everything."), "{:?}", painted(&sender));
+    tab(&mut sender, "Transfers");
+    sender.state_mut().scan();
+    settle(&mut sender);
+    assert!(sender.state().unfinished.is_empty(), "a finished send is listed as unfinished");
+    assert!(!shows(&sender, "Unfinished"));
+    let home = Home::at(tmp.path().join("home-a")).unwrap();
+    assert!(home.list().unwrap().iter().all(|r| r.state == State::Done));
+    tab(&mut sender, "Transfers");
+    button(&mut sender, "Show history");
+    assert!(shows(&sender, "Sent photos"), "{:?}", painted(&sender));
+    assert!(shows(&sender, "1 receiver got everything"));
+}
+
+/// A second send while one is on offer waits in line, and "Send this first"
+/// lets it go ahead: the first one pauses, and carries on when it is stopped.
+#[test]
+fn a_second_send_waits_in_line_and_can_go_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let first = sample_tree(&tmp.path().join("a"));
+    let second = tmp.path().join("b/notes.txt");
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+    std::fs::write(&second, "hola").unwrap();
+    let mut w = window(&tmp.path().join("home"), offline());
+    drop_on(&mut w, &[first]);
+    tick(&mut w, "No Internet? Use a long code instead of four words");
+    button(&mut w, "Start sending");
+    wait(&mut w, "the first ticket", |app| sending(app).ticket.is_some());
+
+    button(&mut w, "Send something else");
+    drop_on(&mut w, &[second]);
+    button(&mut w, "Start sending");
+    wait(&mut w, "the second send to be in line", |app| sending(app).phase == Phase::Queued);
+    assert!(shows(&w, "notes.txt is in line"), "{:?}", painted(&w));
+    assert!(sending(w.state()).ticket.is_none(), "a send in line has no ticket yet");
+
+    tab(&mut w, "Transfers");
+    assert!(shows(&w, "In line: it starts by itself"));
+    button(&mut w, "Send this first");
+    let phase = |app: &carrick_gui::App, i: usize| app.jobs[i].view.lock().unwrap().phase.clone();
+    wait(&mut w, "the second to go and the first to pause", |app| phase(app, 0) == Phase::Offering && phase(app, 1) == Phase::Paused);
+    assert!(shows(&w, "Paused: another send goes first."));
+
+    // Stopping the one in front lets the paused one carry on.
+    w.state().jobs[0].stop();
+    wait(&mut w, "the first to carry on", |app| phase(app, 1) == Phase::Offering);
+    w.state().jobs[1].stop();
+    wait(&mut w, "the first to stop", |app| phase(app, 1).is_over());
+}
+
+#[test]
+fn a_send_stopped_before_anyone_has_it_can_be_continued() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = sample_tree(&tmp.path().join("source"));
+    let mut sender = window(&tmp.path().join("home"), offline());
+    drop_on(&mut sender, &[source]);
+    tick(&mut sender, "No Internet? Use a long code instead of four words");
+    button(&mut sender, "Start sending");
+    wait(&mut sender, "the ticket", |app| sending(app).ticket.is_some());
+
     // Stopped, the send is offered from Unfinished, and Continue offers it again.
+    tab(&mut sender, "Transfers");
     button(&mut sender, "Stop");
     wait(&mut sender, "the send to stop", |app| sending(app).phase == Phase::Stopped);
     wait(&mut sender, "the send to be listed as unfinished", |app| app.unfinished.len() == 1);
@@ -80,11 +159,93 @@ fn a_folder_goes_from_one_window_to_another() {
         app.jobs[0].view.lock().unwrap().phase == Phase::Offering
     });
     assert!(sender.state().unfinished.is_empty(), "a transfer running here is not listed as unfinished");
+    assert!(sender.state().elsewhere.is_empty(), "a transfer this window runs is not listed as running elsewhere");
     assert_eq!(sender.state().jobs.len(), 2);
     button(&mut sender, "Stop");
     wait(&mut sender, "the continued send to stop", |app| {
         app.jobs[0].view.lock().unwrap().phase == Phase::Stopped
     });
+}
+
+/// A receive the terminal runs, seen from the window on the same computer:
+/// shown with where it stands, and never offered to continue while it runs.
+#[test]
+fn a_transfer_running_in_a_terminal_is_shown_and_not_offered_to_continue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("home");
+    let home = Home::at(&home_dir).unwrap();
+    let dest = tmp.path().join("dest");
+    let mut record = receive_record("0123456789", "holiday-videos-2026", &dest);
+    home.save(&mut record).unwrap();
+
+    // What a terminal holds and writes while it receives.
+    let held = home.claim(&record.id).unwrap();
+    let gib = 1024 * 1024 * 1024;
+    home.write_progress(
+        &record.id,
+        &Progress {
+            program: "carrick".into(),
+            stage: Stage::Receiving,
+            name: "holiday-videos-2026".into(),
+            files: 21,
+            have: 3 * gib,
+            total: 9 * gib,
+            direct: Some(true),
+            speed: Some(2.5 * 1024.0 * 1024.0),
+            since: Some(now_secs() - 600),
+            since_have: 0,
+            receivers: Vec::new(),
+            updated: now_secs(),
+        },
+    );
+
+    let mut w = window(&home_dir, offline());
+    tab(&mut w, "Transfers");
+    assert_eq!(w.state().elsewhere.len(), 1);
+    assert!(w.state().unfinished.is_empty(), "a running transfer is listed as unfinished");
+    for text in ["In progress", "Receiving holiday-videos-2026", "In a terminal on this computer", "3.00 GiB of 9.00 GiB", "Direct, computer to computer", "Now 2.50 MiB/s"] {
+        assert!(shows(&w, text), "{text} is not shown: {:?}", painted(&w));
+    }
+    assert!(!shows(&w, "Unfinished"));
+    assert!(w.query_by_role_and_label(Role::Button, "Continue").is_none(), "Continue offered on a running transfer");
+    assert!(w.query_by_role_and_label(Role::Button, "Forget").is_none());
+
+    // The terminal ends (closed, or cut short): now it is unfinished.
+    drop(held);
+    w.state_mut().scan();
+    settle(&mut w);
+    assert!(w.state().elsewhere.is_empty());
+    assert_eq!(w.state().unfinished.len(), 1);
+    assert!(shows(&w, "Unfinished"));
+    assert!(w.query_by_role_and_label(Role::Button, "Continue").is_some());
+}
+
+/// The record of a receive left half way, as the core writes it.
+fn receive_record(id: &str, name: &str, dest: &std::path::Path) -> Record {
+    Record {
+        id: id.into(),
+        role: Way::Receive,
+        state: State::Active,
+        created: now_secs(),
+        updated: 0,
+        code: None,
+        key: Some("ck1example".into()),
+        endpoint_secret: "00".repeat(32),
+        auth_key: "00".repeat(32),
+        root: None,
+        name: name.into(),
+        total_bytes: 114 * 1024 * 1024 * 1024,
+        files: 123,
+        sources: Vec::new(),
+        dest: Some(dest.to_path_buf()),
+        store: dest.join(format!(".carrick-{id}")),
+        relay: None,
+        receivers_wanted: None,
+        finished_receivers: Vec::new(),
+        overwrite: false,
+        existing: None,
+        saved: vec![0],
+    }
 }
 
 #[test]
@@ -101,14 +262,64 @@ fn a_mistyped_code_is_explained() {
     assert!(shows(&w, "Failed: a code has 4 words"));
 }
 
+/// "Save to" opens with the folder used last time, also in a new window, and
+/// offers the last five, newest first; the cross takes one off the list.
+#[test]
+fn save_to_remembers_the_recent_folders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let folders: Vec<std::path::PathBuf> = (1..=7).map(|n| tmp.path().join(format!("folder {n}"))).collect();
+    let mut w = window(&home, offline());
+    tab(&mut w, "Receive");
+    for folder in &folders {
+        w.state_mut().receive.dest = folder.display().to_string();
+        w.state_mut().receive.code = "apple river stone".into();
+        settle(&mut w);
+        button(&mut w, "Start receiving");
+        wait(&mut w, "the refusal", |app| receiving(app).phase.is_over());
+        button(&mut w, "Receive something else");
+    }
+    // The same folder again moves to the front instead of repeating.
+    w.state_mut().receive.dest = folders[4].display().to_string();
+    w.state_mut().receive.code = "apple river stone".into();
+    settle(&mut w);
+    button(&mut w, "Start receiving");
+    wait(&mut w, "the refusal", |app| receiving(app).phase.is_over());
+
+    // A new window, as after closing Carrick or a restart.
+    let mut again = window(&home, offline());
+    tab(&mut again, "Receive");
+    let recent = again.state().receive.recent.clone();
+    assert_eq!(recent.len(), 5, "{recent:?}");
+    assert_eq!(again.state().receive.dest, folders[4].display().to_string());
+    assert_eq!(recent[0], folders[4]);
+    assert_eq!(recent[1..], [folders[6].clone(), folders[5].clone(), folders[3].clone(), folders[2].clone()]);
+
+    // Picked from the list.
+    button(&mut again, "⏷");
+    assert!(shows(&again, "Recent folders"), "{:?}", painted(&again));
+    again.get_by_label(&folders[3].display().to_string()).click();
+    settle(&mut again);
+    assert_eq!(again.state().receive.dest, folders[3].display().to_string());
+
+    // Taken off the list: the first cross is the newest folder's.
+    button(&mut again, "⏷");
+    again.query_all_by_label("🗙").next().expect("a cross for each folder").click();
+    settle(&mut again);
+    assert_eq!(again.state().receive.recent.len(), 4);
+    assert_eq!(window(&home, offline()).state().receive.recent.len(), 4, "the removal is kept");
+}
+
 #[test]
 fn dropping_files_on_another_screen_goes_to_send() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("notes.txt");
     std::fs::write(&file, "hola").unwrap();
     let mut w = window(&tmp.path().join("home"), offline());
+    // The window's name is in its title bar, not again next to the tabs.
+    assert!(painted(&w).iter().all(|t| t != "Carrick"), "{:?}", painted(&w));
     tab(&mut w, "Transfers");
-    assert!(shows(&w, "Nothing here yet"));
+    assert!(shows(&w, "Nothing is being copied right now."));
     drop_on(&mut w, &[file.clone(), file.clone()]);
     assert_eq!(w.state().screen, Screen::Send);
     assert_eq!(w.state().send.paths, vec![file], "the same file is listed once");
@@ -230,7 +441,7 @@ fn the_window_asks_about_files_that_already_exist() {
     let mut receiver = window(&tmp.path().join("home-b"), offline());
 
     drop_on(&mut sender, &[source.clone()]);
-    tick(&mut sender, "Use a ticket instead of a code (works without Internet)");
+    tick(&mut sender, "No Internet? Use a long code instead of four words");
     button(&mut sender, "Start sending");
     wait(&mut sender, "the ticket", |app| sending(app).ticket.is_some());
     let ticket = copy_with(&mut sender, "Copy");

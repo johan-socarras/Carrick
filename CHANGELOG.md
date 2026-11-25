@@ -5,6 +5,54 @@ What changes in each version of Carrick. The format follows
 follow [Semantic Versioning](https://semver.org/). This repository's history starts at
 0.1.5; the versions before it are listed for what they changed.
 
+## [0.2.0] - 2026-11-25
+
+### Added
+
+- Sends wait in line. Starting a send while another is on offer puts the new
+  one in line instead of sharing the connection with it; its four-word code
+  works at once, and the other computer waits and starts by itself when its
+  turn comes. **Send this first** lets one go ahead: the send in front pauses,
+  its receivers wait, and it carries on by itself after.
+- A history of the last three transfers that ended well on this computer,
+  from the window or the terminal, under **Show history** in Transfers: what
+  it was, how many files and how large, when, how long it took, the average
+  speed, whether it went directly, and where it was saved.
+- The window shows the transfers a terminal (or another window) is running on
+  the same computer, with their progress, speed and route, instead of
+  offering to continue them. A transfer can only run once on a computer:
+  `carrick resume` leaves the running ones alone, `carrick cancel` refuses
+  them, and `carrick list` marks them `running`.
+- **Copy command** next to **Copy** puts the whole `carrick receive …`
+  command on the clipboard, for a terminal on the other computer.
+- **Save to** opens with the folder used last time, also after a restart, and
+  its arrow offers the last five folders; the cross takes one off the list.
+
+### Changed
+
+- The window takes the colours of the icon: its blue-to-cyan on the main
+  buttons, the progress bars and the selected tab, the icon itself where the
+  name was, the code in a box of its own, and how data travels (directly or
+  through a relay) as a coloured label.
+- Under Transfers, only what is being copied now; what ended goes to the
+  history.
+- In the window, the ticket is now called a long code, and its option says
+  what it is for: "No Internet? Use a long code instead of four words".
+
+### Fixed
+
+- A send that someone had received in full no longer stays under Unfinished
+  once stopped or closed, to be offered again for nobody. A send offered
+  until stopped now ends when it is stopped, if anyone has everything.
+- The terminal's progress bar stays on one line when the window is resized.
+  It used to fill the whole width, and a resize split it and left pieces of
+  old lines behind; in the classic Windows console every update also went to
+  a new line.
+- A folder's hidden `desktop.ini` (and `Thumbs.db`) arrives hidden, instead of
+  showing up as a stray file in the destination.
+- `CARRICK_NO_NOTIFY=1` is accepted (so are `yes`, `on`, `0` and the rest);
+  before, only `true` or `false` were, and the terminal refused to start.
+
 ## [0.1.8] - 2026-11-24
 
 ### Changed
@@ -112,5 +160,6 @@ The first version.
 - Installers for Windows (per user, without administrator rights) and a
   `.deb` for Ubuntu and Debian, with the licences of every crate inside.
 
+[0.2.0]: https://github.com/johan-socarras/Carrick/releases/tag/v0.2.0
 [0.1.8]: https://github.com/johan-socarras/Carrick/releases/tag/v0.1.8
 [0.1.7]: https://github.com/johan-socarras/Carrick/releases/tag/v0.1.7

@@ -71,8 +71,9 @@ struct Cli {
     #[arg(long, global = true)]
     plain: bool,
 
-    /// Do not show a system notification when a transfer ends.
-    #[arg(long, global = true, env = "CARRICK_NO_NOTIFY")]
+    /// Do not show a system notification when a transfer ends. The variable
+    /// takes 1, true, yes or on (and 0, false, no or off).
+    #[arg(long, global = true, env = "CARRICK_NO_NOTIFY", value_parser = clap::builder::BoolishValueParser::new())]
     no_notify: bool,
 
     /// Say more about what is happening (-v, -vv).
@@ -147,7 +148,31 @@ enum AutostartAction {
     Status,
 }
 
+/// The classic Windows console (conhost) only redraws the progress bar in
+/// place when it is told to understand the terminal's cursor commands;
+/// without that, every update of the bar lands on a new line.
+#[cfg(windows)]
+fn understand_cursor_commands() {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for which in [STD_ERROR_HANDLE, STD_OUTPUT_HANDLE] {
+        // SAFETY: plain calls on the process's own standard handles; a handle
+        // that is not a console makes GetConsoleMode fail, and it is left alone.
+        unsafe {
+            let handle = GetStdHandle(which);
+            let mut mode: CONSOLE_MODE = 0;
+            if GetConsoleMode(handle, &mut mode) != 0 {
+                SetConsoleMode(handle, mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    understand_cursor_commands();
     let cli = Cli::parse();
     let threads = cli
         .threads
@@ -208,7 +233,7 @@ async fn run(cli: Cli) -> Result<i32> {
             let stop = stop_on_ctrl_c();
             let (tx, rx) = events::channel();
             let ui = tokio::spawn(show(rx, plain, notify));
-            let outcome = send::send(&home, SendOptions { paths, ticket, receivers, net }, tx, stop).await;
+            let outcome = send::send(&home, SendOptions { paths, ticket, receivers, net, turn: None }, tx, stop).await;
             ui.await.ok();
             finish_send(outcome, notify)
         }
@@ -300,9 +325,12 @@ fn finish_send(outcome: Result<SendOutcome>, notify: bool) -> Result<i32> {
             Ok(0)
         }
         SendOutcome::Stopped { receivers } => {
-            eprintln!(
-                "Stopped. {receivers} receiver(s) finished so far. The transfer is kept: `carrick resume` offers it again."
-            );
+            let so_far = if receivers == 0 {
+                "Stopped before anyone had everything.".to_string()
+            } else {
+                format!("Stopped with {receivers} receiver(s) finished, fewer than --receivers asked for.")
+            };
+            eprintln!("{so_far} The transfer is kept: `carrick resume` offers it again.");
             Ok(130)
         }
     }
@@ -345,9 +373,18 @@ fn finish_receive(outcome: Result<ReceiveOutcome>, notify: bool) -> Result<i32> 
 }
 
 async fn resume(home: &Home, plain: bool, notify: bool) -> Result<i32> {
-    let active: Vec<Record> = home.list()?.into_iter().filter(|r| r.state == State::Active).collect();
+    let (elsewhere, active): (Vec<Record>, Vec<Record>) = home
+        .list()?
+        .into_iter()
+        .filter(|r| r.state == State::Active)
+        .partition(|r| home.is_running(&r.id));
+    for record in &elsewhere {
+        eprintln!("[{}] already running in another Carrick on this computer; left there.", record.id);
+    }
     if active.is_empty() {
-        eprintln!("Nothing to resume.");
+        if elsewhere.is_empty() {
+            eprintln!("Nothing to resume.");
+        }
         return Ok(0);
     }
     let _awake = Awake::hold();
@@ -363,7 +400,7 @@ async fn resume(home: &Home, plain: bool, notify: bool) -> Result<i32> {
             let (tx, rx) = events::channel();
             let ui = tokio::spawn(show_labelled(rx, plain, notify, label.clone(), None));
             let code = match record.role {
-                Role::Send => finish_send(send::resume_send(&home, record, tx, stop).await, notify),
+                Role::Send => finish_send(send::resume_send(&home, record, None, tx, stop).await, notify),
                 Role::Receive => finish_receive(recv::resume_receive(&home, record, None, tx, stop).await, notify),
             };
             ui.await.ok();
@@ -395,6 +432,7 @@ fn list(home: &Home) -> Result<()> {
             Role::Receive => "receive",
         };
         let state = match r.state {
+            State::Active if home.is_running(&r.id) => style("running  ").cyan(),
             State::Active => style("active   ").yellow(),
             State::Done => style("done     ").green(),
             State::Cancelled => style("cancelled").dim(),
@@ -426,6 +464,48 @@ async fn show(rx: EventRx, plain: bool, notify: bool) {
     show_labelled(rx, plain, notify, String::new(), None).await
 }
 
+/// The terminal, as the progress bar sees it: never wider than 79 columns,
+/// and always one column short of the real width. The bar pads its line with
+/// spaces to the width it is told; a line as wide as the window is split in
+/// two when the window is resized, and the bar then redraws on the wrong
+/// rows and leaves pieces of old lines behind.
+#[derive(Debug)]
+struct Narrow(console::Term);
+
+impl indicatif::TermLike for Narrow {
+    fn width(&self) -> u16 {
+        let (_, columns) = self.0.size();
+        columns.saturating_sub(1).clamp(20, 79)
+    }
+    fn height(&self) -> u16 {
+        self.0.size().0
+    }
+    fn move_cursor_up(&self, n: usize) -> std::io::Result<()> {
+        self.0.move_cursor_up(n)
+    }
+    fn move_cursor_down(&self, n: usize) -> std::io::Result<()> {
+        self.0.move_cursor_down(n)
+    }
+    fn move_cursor_right(&self, n: usize) -> std::io::Result<()> {
+        self.0.move_cursor_right(n)
+    }
+    fn move_cursor_left(&self, n: usize) -> std::io::Result<()> {
+        self.0.move_cursor_left(n)
+    }
+    fn write_line(&self, s: &str) -> std::io::Result<()> {
+        self.0.write_line(s)
+    }
+    fn write_str(&self, s: &str) -> std::io::Result<()> {
+        self.0.write_str(s)
+    }
+    fn clear_line(&self) -> std::io::Result<()> {
+        self.0.clear_line()
+    }
+    fn flush(&self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 /// How long data may keep going through the relay before saying it is slow.
 const RELAY_HINT_AFTER: Duration = Duration::from_secs(20);
 
@@ -433,9 +513,13 @@ const RELAY_HINT_AFTER: Duration = Duration::from_secs(20);
 /// `ask` is where the answer goes when the receive asks what to do with
 /// files that already exist; without it, nobody is asked.
 async fn show_labelled(mut rx: EventRx, plain: bool, notify: bool, label: String, ask: Option<recv::AnswerTx>) {
-    let bar = ProgressBar::with_draw_target(None, if plain { ProgressDrawTarget::hidden() } else { ProgressDrawTarget::stderr() });
+    let target = if plain { ProgressDrawTarget::hidden() } else { ProgressDrawTarget::term_like_with_hz(Box::new(Narrow(console::Term::stderr())), 20) };
+    let bar = ProgressBar::with_draw_target(None, target);
+    // A bar of fixed width, so the line stays well under the width of a
+    // normal terminal: a line as wide as the window is wrapped again when the
+    // window is resized, and the bar then redraws on the wrong rows.
     let bytes_style = ProgressStyle::with_template(
-        "{msg:<12} [{wide_bar:.cyan/blue}] {bytes}/{total_bytes}  {binary_bytes_per_sec}  eta {eta}",
+        "{msg:<9} [{bar:16.cyan/blue}] {bytes}/{total_bytes} {binary_bytes_per_sec} eta {eta}",
     )
     .expect("template")
     .progress_chars("=> ");
@@ -508,6 +592,9 @@ async fn show_labelled(mut rx: EventRx, plain: bool, notify: bool, label: String
                 say(&bar, String::new());
                 say(&bar, format!("Waiting for receivers (transfer {id}). Ctrl+C stops; `carrick resume` offers it again."));
             }
+            // The terminal sends at once; these come only from a line of sends.
+            Event::Queued { name, .. } => say(&bar, format!("{name} is in line behind another send.")),
+            Event::Paused => say(&bar, "Paused: another send goes first. It carries on by itself after.".to_string()),
             Event::ReceiverJoined { receiver } => say(&bar, format!("  > {receiver} connected")),
             Event::ReceiverRoute { receiver, route } => {
                 let how = match route {

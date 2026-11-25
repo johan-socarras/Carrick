@@ -35,6 +35,10 @@ pub enum Phase {
     Starting,
     /// Fingerprinting the files before they can be offered.
     Preparing { done: u64, total: u64 },
+    /// Prepared, waiting in line behind another send.
+    Queued,
+    /// Off the network while another send goes first.
+    Paused,
     /// On offer, waiting for receivers or serving them.
     Offering,
     /// Looking for the sender.
@@ -260,6 +264,21 @@ impl JobView {
                 self.total = total;
                 self.phase = Phase::Offering;
             }
+            Event::Queued { id, code, name, files, total } => {
+                self.id = Some(id);
+                self.code = code;
+                self.name = name;
+                self.files = files;
+                self.total = total;
+                self.phase = Phase::Queued;
+            }
+            Event::Paused => {
+                for r in &mut self.receivers {
+                    r.connected = false;
+                }
+                self.receiver_pace.values_mut().for_each(Pace::pause);
+                self.phase = Phase::Paused;
+            }
             Event::ReceiverJoined { receiver } => {
                 let r = self.receiver(&receiver);
                 r.connected = true;
@@ -390,6 +409,10 @@ pub struct Job {
     owns: Box<dyn Fn(&Record, &JobView) -> bool + Send>,
     /// Where the answer goes when a receive asks about files that exist.
     pub answer: Option<recv::AnswerTx>,
+    /// For a send: whether it may be on the network now, and its place in
+    /// the line of sends (lower goes first).
+    pub turn: Option<tokio::sync::watch::Sender<bool>>,
+    pub place: i64,
 }
 
 impl Job {
@@ -444,7 +467,7 @@ impl Job {
             shown.lock().expect("view").finish(outcome);
             repaint.request_repaint();
         });
-        Self { view, stop, owns: Box::new(owns), answer: None }
+        Self { view, stop, owns: Box::new(owns), answer: None, turn: None, place: 0 }
     }
 
     /// Answers the receive's question about files that already exist.

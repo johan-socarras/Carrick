@@ -30,6 +30,28 @@ pub fn eta(left: Duration) -> String {
     }
 }
 
+/// How long something took: `45 s`, `12 min`, `1 h 05 min`.
+pub fn took(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{} s", seconds.max(1))
+    } else if seconds < 3600 {
+        format!("{} min", (seconds + 30) / 60)
+    } else {
+        format!("{} h {:02} min", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+/// How long ago: `just now`, `12 min ago`, `3 h ago`, `yesterday`, `4 days ago`.
+pub fn ago(seconds: u64) -> String {
+    match seconds {
+        0..60 => "just now".to_string(),
+        60..3600 => format!("{} min ago", seconds / 60),
+        3600..86_400 => format!("{} h ago", seconds / 3600),
+        86_400..172_800 => "yesterday".to_string(),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
 /// `n file` or `n files`.
 pub fn files(n: u64) -> String {
     if n == 1 {
@@ -67,6 +89,19 @@ mod tests {
         assert_eq!(eta(Duration::from_millis(300)), "1 s");
         assert_eq!(eta(Duration::from_secs(61)), "2 min");
         assert_eq!(eta(Duration::from_secs(3600 + 5 * 60)), "1 h 05 min");
+    }
+
+    #[test]
+    fn times_taken_and_ago() {
+        assert_eq!(took(0), "1 s");
+        assert_eq!(took(45), "45 s");
+        assert_eq!(took(29 * 60 + 40), "30 min");
+        assert_eq!(took(3600 + 5 * 60), "1 h 05 min");
+        assert_eq!(ago(10), "just now");
+        assert_eq!(ago(12 * 60), "12 min ago");
+        assert_eq!(ago(3 * 3600), "3 h ago");
+        assert_eq!(ago(30 * 3600), "yesterday");
+        assert_eq!(ago(4 * 86_400), "4 days ago");
     }
 
     #[test]
