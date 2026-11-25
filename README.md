@@ -88,27 +88,46 @@ The builds are in [Releases](https://github.com/johan-socarras/Carrick/releases)
   or keep both.
 - **Several receivers at once**, which also pass finished files to one
   another, so the sender does not have to upload everything to everyone.
+- **Sends wait in line.** A second send waits for the first instead of
+  sharing the connection with it, and **Send this first** lets an urgent one
+  go ahead; the one it passes pauses and carries on by itself after.
 - **No size, count or time limits.** Files are fingerprinted where they are,
   not copied first.
 
 ## The window
 
 `carrick-gui` has three screens, **Send**, **Receive** and **Transfers**, plus
-**About**. Drop files or a folder, and it shows the code in large type with a
-button to copy it. On the other computer, type the code, choose a folder, and
-follow the transfer: the speed now and on average, the time left and the time
-taken, and whether it goes directly or through a relay.
+**About**. Drop files or a folder, and it shows the code in large type, with
+**Copy** for the code and **Copy command** for the whole `carrick receive …`
+line, for a terminal on the other computer. On the other computer, type the
+code, choose a folder, and follow the transfer: the speed now and on average,
+the time left and the time taken, and whether it goes directly or through a
+relay.
 
 <p align="center">
-  <img src="docs/screenshots/receive-progress.png" width="49%" alt="A transfer arriving: 158 MiB of 521 MiB, directly, computer to computer">
-  <img src="docs/screenshots/transfers-sending.png" width="49%" alt="The sender's view: one receiver connected directly, 305 MiB of 521 MiB, at 305 MiB/s">
+  <img src="docs/screenshots/receive-progress.png" width="49%" alt="A transfer arriving: 30 percent of 521 MiB, at 151 MiB/s, directly, computer to computer">
+  <img src="docs/screenshots/transfers-sending.png" width="49%" alt="The sender's view: one receiver connected directly, 152 MiB of 521 MiB">
 </p>
 
-**Transfers** lists every transfer with its receivers, and what was left
-unfinished on this computer, to continue it or forget it:
+**Transfers** shows what is being copied now. A send started while another is
+on offer waits in line, and **Send this first** lets it go ahead. Transfers
+that a terminal runs on the same computer show up too, with their progress,
+instead of being offered to continue:
 
 <p align="center">
-  <img src="docs/screenshots/transfers-unfinished.png" width="60%" alt="A stopped transfer whose two receivers have everything, and below it, under Unfinished, the same transfer with Continue and Forget">
+  <img src="docs/screenshots/transfers-line.png" width="49%" alt="Two sends: one on offer, and the other paused while it goes first, with Send this first and Stop">
+  <img src="docs/screenshots/transfers-terminal.png" width="49%" alt="A receive running in a terminal on this computer: 3 GiB of 9 GiB, 40 minutes left, directly">
+</p>
+
+What ended goes to **Show history**, which keeps the last three: how large,
+when, how long it took, the average speed and the route. Below what is being
+copied, **Unfinished** lists what was stopped half way, to continue it or
+forget it. On the Receive screen, **Save to** opens with the folder used last
+time, and its arrow offers the last five:
+
+<p align="center">
+  <img src="docs/screenshots/transfers-history.png" width="49%" alt="The history: a send of 6 files and 521 MiB that took 9 seconds at 116 MiB/s on average, directly, and that 2 receivers got in full">
+  <img src="docs/screenshots/receive-recent.png" width="49%" alt="Save to with its list of recent folders open, each with a cross to take it off the list">
 </p>
 
 It is light, dark, or as the system is, from the buttons at the top right, and
@@ -139,21 +158,21 @@ On the other computer run:
 $ carrick receive dumpster-wikipedia-powwow-spectator
 Connected directly, computer to computer
 Receiving photos — 1203 file(s), 98.4 GiB
-Receiving    [==========>              ] 41.2 GiB/98.4 GiB  112 MiB/s  eta 8m
+Receiving [======>         ] 41.2 GiB/98.4 GiB 112 MiB/s eta 8m
 ```
 
 ```
 carrick send <PATH>...           offer files or folders, print the code
 carrick receive <CODE> [-o DIR]  receive into DIR (default: current folder)
 carrick resume                   continue everything unfinished on this computer
-carrick list                     show known transfers
+carrick list                     show known transfers, and which are running
 carrick cancel <ID>              forget a transfer
 carrick autostart on|off|status  run `resume` at sign-in, to survive a reboot
 ```
 
 | Option | What it does |
 |---|---|
-| `send --ticket` | Give a long ticket instead of a code. A ticket needs no lookup service, so it also works on a network without Internet. |
+| `send --ticket` | Give a long ticket instead of a code (the window calls it a long code). A ticket needs no lookup service, so it also works on a network without Internet. |
 | `send --receivers N` | Stop once N receivers have everything. By default the transfer stays on offer until you stop it. |
 | `receive --overwrite`, `--skip-existing`, `--keep-both` | What to do with destination files that differ from the incoming ones: replace them, leave them (and not fetch them), or save the incoming one beside as `name (2).ext`. Without any, Carrick asks, or keeps both if nobody is at the terminal. |
 | `receive --seed` | After finishing, keep passing files to other receivers. |

@@ -16,14 +16,21 @@ hand.
   between endpoints in one process, with no relay and no Internet. A folder
   arrives identical; a stopped transfer leaves its finished files in place and continues
   from where it stopped; files that already exist are asked about, and are
-  skipped or replaced as answered.
+  skipped or replaced as answered. A send waits its turn off the network,
+  gives way to another and comes back while its receiver carries on; a send
+  someone has in full ends when stopped; a transfer cannot run twice on one
+  computer; the history keeps the last three; and, on Windows, a hidden
+  `desktop.ini` arrives hidden.
 - **The window** (`crates/carrick-gui/tests/window.rs`): the window is driven
   from code through its accessibility tree, with [egui_kittest], without being
   shown. Two windows in one process send a folder to each other through their
   buttons, and it arrives identical, with an empty file, an empty folder and
-  a non-ASCII name: drop a folder, ask for a ticket, *Start sending*, *Copy*; paste,
-  choose a folder, *Start receiving*. Then *Stop*, *Continue* and *Stop* again
-  from Transfers. Other tests cover a long name that must not push the buttons
+  a non-ASCII name: drop a folder, ask for a long code, *Start sending*, *Copy*
+  and *Copy command*; paste, choose a folder, *Start receiving*. Stopped, the
+  send ends and both sides find it under *Show history*. Other tests cover
+  *Stop* and *Continue* of a send nobody has yet, a second send that waits in
+  line and goes first, a receive run by a terminal on the same computer, the
+  recent folders of *Save to*, a long name that must not push the buttons
   out, *Forget*, the question about existing files, the light and dark modes,
   and the links in About.
 
