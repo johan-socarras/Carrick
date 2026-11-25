@@ -23,7 +23,7 @@
     }
 
     if ([Environment]::OSVersion.Platform -ne 'Win32NT') {
-        Stop-Install 'This installer is for Windows. On Linux, build the .deb: see the README.'
+        Stop-Install 'This installer is for Windows. On Linux, use install.sh: see the README.'
     }
     # Windows PowerShell 5.1 may still offer only older TLS versions.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12

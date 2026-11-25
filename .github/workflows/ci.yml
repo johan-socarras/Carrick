@@ -8,9 +8,9 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE-*', 'install.ps1']
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE-*', 'install.ps1', 'install.sh']
   pull_request:
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE-*', 'install.ps1']
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE-*', 'install.ps1', 'install.sh']
   workflow_dispatch:
     inputs:
       windows:

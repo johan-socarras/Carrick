@@ -36,7 +36,8 @@ other computer you only type four words.
 [The terminal](#the-terminal) · [Getting through networks](#getting-through-networks) ·
 [How it works](#how-it-works) · [Security](#security) ·
 [Limits](#limits) · [Build from source](#build-from-source) ·
-[Testing](#testing) · [Credits](#credits) · [License](#license)
+[Testing](#testing) · [Contributors](#contributors) · [Credits](#credits) ·
+[License](#license)
 
 ## Download
 
@@ -56,8 +57,18 @@ The builds are in [Releases](https://github.com/johan-socarras/Carrick/releases)
   to the Start menu and `carrick` to the PATH, updates an older version in
   place, and uninstalls cleanly. It is not code-signed, so Windows
   SmartScreen warns the first time.
-- **Ubuntu 24.04 and newer**: download `carrick_<version>-1_amd64.deb` from
-  the release and install it with
+- **Ubuntu 24.04 and newer**: in a terminal,
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/johan-socarras/Carrick/main/install.sh | bash
+  ```
+
+  downloads the `.deb` of the latest release, checks it against the SHA-256
+  GitHub publishes for it, and installs it with apt (it asks for your
+  password through sudo). Run it again to update.
+
+  Or download `carrick_<version>-1_amd64.deb` from the release yourself and
+  install it with
 
   ```bash
   sudo apt install ./carrick_*_amd64.deb
@@ -267,6 +278,12 @@ both sides killed half way, a simulated network of NAT routers, the relay
 container, the window on Linux, the installers) are in
 [docs/testing.md](docs/testing.md). What changed in each version is in the
 [changelog](CHANGELOG.md).
+
+## Contributors
+
+- [**johan-socarras**](https://github.com/johan-socarras): idea, design,
+  testing and direction.
+- **Claude** (Anthropic): the AI that wrote the code.
 
 ## Credits
 
