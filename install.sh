@@ -110,6 +110,7 @@ main() {
     [ -n "$version" ] || fail "apt finished, but the carrick package is not installed."
     printf '\033[32mCarrick %s is installed.\033[0m\n' "$version"
     echo "Open it from your applications menu, or run carrick in a terminal."
+    echo "Carrick is free software under the MIT or Apache 2.0 licence, provided as is, without warranty."
 }
 
 main "$@"

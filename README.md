@@ -248,6 +248,9 @@ The details, and how to report a vulnerability, are in
 - Symbolic links are not followed and not sent.
 - Windows and Linux. macOS should build but is untested; there is no phone or
   web client.
+- Check that a transfer finished on the other computer before you delete the
+  original. Carrick never deletes your files, but it cannot know you have no
+  other copy.
 
 ## Build from source
 
@@ -294,6 +297,9 @@ the [EFF large word list] (CC BY 3.0 US), minus its four hyphenated words.
 
 Carrick is licensed under either of the [MIT licence](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+Carrick is provided as is, without warranty of any kind. The authors are not
+liable for any loss or damage from its use, including lost or exposed data.
 
 [iroh]: https://github.com/n0-computer/iroh
 [iroh-blobs]: https://github.com/n0-computer/iroh-blobs

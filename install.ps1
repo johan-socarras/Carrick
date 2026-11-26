@@ -78,4 +78,5 @@
     $version = & (Join-Path $installed 'carrick.exe') --version 2>$null | Select-Object -First 1
     Write-Host "$version is installed in $installed." -ForegroundColor Green
     Write-Host 'Open it from the Start menu, or run carrick in a new terminal.'
+    Write-Host 'Carrick is free software under the MIT or Apache 2.0 licence, provided as is, without warranty.'
 }
